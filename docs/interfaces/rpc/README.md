@@ -149,6 +149,11 @@ the same way regardless of transport.
   banner and write structured logs so operators can correlate with uptime
   probes. The probes treat reconnect+resume as healthy; loops that restart
   without progressing the cursor are considered degraded.
+* **Operator restarts** – Node processes may restart during backends switchover
+  or rollouts. Wallet and indexer SDKs should treat `ECONNRESET`, `ECONNREFUSED`,
+  and HTTP `503` responses as transient for up to five minutes while the leader
+  elections settle. Clients must continue replaying from the last durable cursor
+  or cached response instead of rebuilding history from scratch.
 
 ### Detecting prunes and replay gaps
 
