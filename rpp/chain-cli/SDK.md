@@ -82,3 +82,25 @@ To reproduce the same coverage locally:
    server harness.
 3. Toggle the `AUTH_TOKEN` constant in `tests/sdk_mobile_embedded_smoke.rs` if
    you want to validate client behavior against alternate bearer tokens.
+
+## Reconnect and replay after node restarts
+
+Long-lived clients should assume occasional consensus restarts and keep their
+subscriptions or polling loops alive without dropping user-visible state. Use a
+monotonic retry strategy across transports:
+
+* **SSE/WebSocket subscribers** – reuse the last durable cursor or sequence
+  number when reconnecting, emit a short exponential backoff (`250 ms`,
+  `500 ms`, `1 s`, capped at `5 s`), and log every reconnect attempt. Treat a
+  reset connection during leadership changes as informational; only surface an
+  error after three consecutive failures within five minutes.
+* **Polling JSON-RPC clients** – treat `ECONNRESET`, `ECONNREFUSED`, and `503`
+  errors as transient while a node comes back. Retry the same request payload
+  after an exponential backoff capped at `5 s` instead of rebuilding higher
+  layers like wallet caches. Keep the last successful response around so UI
+  components can render stale-but-correct values during the reconnect window.
+
+The `rpc_sdk_reconnect` integration test exercises these behaviors for the Rust
+(`rpp_wallet::rpc::client`), Go (HTTP poller), and TypeScript (Node fetch)
+clients while restarting consensus nodes. When it fails, inspect the captured
+artifacts under `logs/sdk-reconnect/` before retrying locally.

@@ -345,6 +345,11 @@ path = "../../tests/sdk_mobile_embedded_smoke.rs"
 required-features = ["wallet-integration"]
 
 [[test]]
+name = "rpc_sdk_reconnect"
+path = "../../tests/rpc_sdk_reconnect.rs"
+required-features = ["integration", "wallet-integration"]
+
+[[test]]
 name = "reorg_stark"
 path = "../../tests/reorg_stark.rs"
 required-features = ["backend-rpp-stark"]
