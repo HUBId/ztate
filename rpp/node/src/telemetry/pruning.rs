@@ -27,6 +27,9 @@ pub struct PruningMetrics {
     pacing_delay_ms: Histogram<f64>,
     mempool_backlog: Histogram<u64>,
     mempool_latency_ms: Histogram<f64>,
+    io_bytes_written: Histogram<u64>,
+    io_duration_ms: Histogram<f64>,
+    io_throughput_bytes_per_sec: Histogram<f64>,
     shard_label: KeyValue,
     partition_label: KeyValue,
 }
@@ -127,6 +130,21 @@ impl PruningMetrics {
             )
             .with_unit("ms")
             .build();
+        let io_bytes_written = meter
+            .u64_histogram("rpp.node.pruning.io_bytes_written")
+            .with_description("Bytes written while persisting pruning artifacts during a cycle")
+            .with_unit("By")
+            .build();
+        let io_duration_ms = meter
+            .f64_histogram("rpp.node.pruning.io_duration_ms")
+            .with_description("Duration spent writing pruning artifacts in milliseconds")
+            .with_unit("ms")
+            .build();
+        let io_throughput_bytes_per_sec = meter
+            .f64_histogram("rpp.node.pruning.io_throughput_bytes_per_sec")
+            .with_description("Effective pruning IO throughput during a cycle in bytes per second")
+            .with_unit("By/s")
+            .build();
 
         let shard_label = KeyValue::new(
             "shard",
@@ -154,6 +172,9 @@ impl PruningMetrics {
             pacing_delay_ms,
             mempool_backlog,
             mempool_latency_ms,
+            io_bytes_written,
+            io_duration_ms,
+            io_throughput_bytes_per_sec,
             shard_label,
             partition_label,
         }
@@ -196,6 +217,17 @@ impl PruningMetrics {
                 .record(status.stored_proofs.len() as u64, &backlog_labels);
             let processed_attrs = self.with_base_labels([KeyValue::new("reason", reason_attr)]);
             self.keys_processed.record(processed, &processed_attrs);
+            if let Some(bytes) = status.io_bytes_written {
+                self.io_bytes_written.record(bytes, &processed_attrs);
+            }
+            if let Some(duration_ms) = status.io_duration_ms {
+                self.io_duration_ms
+                    .record(duration_ms as f64, &processed_attrs);
+            }
+            if let Some(throughput) = status.io_throughput_bytes_per_sec {
+                self.io_throughput_bytes_per_sec
+                    .record(throughput as f64, &processed_attrs);
+            }
 
             let estimate_ms = status
                 .estimated_time_remaining_ms
@@ -571,7 +603,23 @@ mod tests {
             stored_proofs: (0..stored as u64).collect(),
             last_updated: 0,
             estimated_time_remaining_ms: None,
+            io_bytes_written: None,
+            io_duration_ms: None,
+            io_throughput_bytes_per_sec: None,
         }
+    }
+
+    fn sample_status_with_io(
+        missing: usize,
+        stored: usize,
+        bytes: u64,
+        duration_ms: u64,
+    ) -> PruningJobStatus {
+        let mut status = sample_status(missing, stored);
+        status.io_bytes_written = Some(bytes);
+        status.io_duration_ms = Some(duration_ms);
+        status.io_throughput_bytes_per_sec = Some(bytes * 1_000 / duration_ms.max(1));
+        status
     }
 
     #[test]
@@ -598,6 +646,38 @@ mod tests {
             &exported,
             "rpp.node.pruning.time_remaining_ms",
             |v| v >= 3_900.0
+        ));
+    }
+
+    #[test]
+    fn records_io_throughput_signals() {
+        let (metrics, exporter, provider) = setup_meter();
+        let status = sample_status_with_io(3, 2, 8_192, 200);
+
+        metrics.record_cycle(
+            CycleReason::Scheduled,
+            CycleOutcome::Success,
+            Duration::from_secs(1),
+            Some(&status),
+        );
+
+        provider.force_flush().unwrap();
+        let exported = exporter.get_finished_metrics().unwrap();
+
+        assert!(histogram_has_value(
+            &exported,
+            "rpp.node.pruning.io_bytes_written",
+            |v| v >= 8_000.0
+        ));
+        assert!(histogram_has_value(
+            &exported,
+            "rpp.node.pruning.io_duration_ms",
+            |v| v >= 200.0
+        ));
+        assert!(histogram_has_value(
+            &exported,
+            "rpp.node.pruning.io_throughput_bytes_per_sec",
+            |v| v >= 40_000.0
         ));
     }
 

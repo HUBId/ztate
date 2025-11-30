@@ -138,6 +138,28 @@ mit dem [On-Call-Handbuch](./oncall.md#alert-reaction-quick-reference) synchroni
 | `pipeline_submissions_total` metrics report many `reason="tier_requirement"` rejections | Review the labelled counter from the metrics backend; the orchestrator records tier and gossip errors when rejecting workflows.【F:rpp/runtime/orchestration.rs†L623-L704】 | Investigate the submitting account’s reputation tier via `/wallet/reputation/:address` (include the Authorization header when RPC auth is enabled[^rpc-auth]) or adjust the workflow policy; see [modes](../modes.md) for role-specific submission expectations.【F:rpp/rpc/api.rs†L984-L1059】 |
 | Slashing dashboards show `kind=censorship` oder `kind=inactivity` Ausschläge | Prüfe `rpp.node.slashing.events_total` und `queue_segments` nach Validator-IDs mit gehäuften Meldungen; korreliere mit `consensus`-Logs für `registered censorship trigger` bzw. `registered inactivity trigger`.【F:rpp/node/src/telemetry/slashing.rs†L59-L93】【F:rpp/consensus/src/state.rs†L1000-L1199】 | Abgleich mit den in `consensus.config` gesetzten Grenzwerten (`censorship_vote_threshold`, `censorship_proof_threshold`, `inactivity_threshold`) und Validator-Runbooks; wiederholte Treffer deuten auf blockierte Votes/Proofs oder dauerhaftes Fernbleiben hin. Fordere betroffene Operatoren zur Netzwerkanalyse auf und evaluiere Slashing-/Ersatzmaßnahmen anhand der Testfälle.【F:tests/consensus/censorship_inactivity.rs†L1-L260】 |
 
+## Firewood-Pruning-IO-Bottleneck {#firewood-pruning-io-bottleneck}
+
+Sowohl `FirewoodPruningIoBottleneckWarning` als auch `FirewoodPruningIoBottleneckCritical` feuern,
+wenn die Durchsatz-Histogramme `rpp.node.pruning.io_throughput_bytes_per_sec` länger als den
+Schwellwert unter Last bleiben und gleichzeitig `missing_heights` bzw. `time_remaining_ms` größer
+als null sind.【F:rpp/node/src/telemetry/pruning.rs†L21-L125】【F:ops/alerts/storage/firewood.yaml†L70-L120】 Beobachte die
+gleiche Label-Kombination (`shard`, `partition`, `reason`) auf den korrespondierenden Backlog- und
+ETA-Metriken, um Stalls einzukreisen.
+
+1. **Pruning pausieren.** Stoppe laufende Zyklen mit `rppctl pruning pause`, damit weitere
+   Checkpoints die langsame Platte nicht füllen.【F:rpp/node/src/services/pruning.rs†L740-L800】
+2. **IO-Pfade prüfen.** Vergleiche `io_bytes_written` und `io_duration_ms` aus dem aktuellen
+   `/snapshots/pruning/status` Response, um zu bestätigen, dass der Durchsatz knapp über `1 MiB/s`
+   liegt. Wechsle falls möglich auf einen lokalen NVMe-Mount für `snapshot_dir`/`proof_dir`.
+3. **Budgets anheben.** Erhöhe `storage.firewood.commit_io_budget_bytes` und
+   `storage.firewood.compaction_io_budget_bytes` gemäß der [Firewood-Storage-Anleitung](../storage/firewood.md#io-budget-und-pruning-throttling),
+   damit die Hintergrund-Writer die fehlenden Höhen schneller abtragen.
+4. **Wieder aufnehmen.** Sobald die 10‑Minuten-Durchschnittswerte über dem Warnschwellenwert
+   liegen und `missing_heights` fällt, setze `rppctl pruning resume` und beobachte, ob das
+   Zeitbudget `time_remaining_ms` wieder sinkt. Missglückt der Versuch, migriere die Pruning-
+   Verzeichnisse auf ein schnelleres Volume.
+
 
 ### Firewood storage alert reference
 

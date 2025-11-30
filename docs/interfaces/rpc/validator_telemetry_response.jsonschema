@@ -132,7 +132,10 @@
           "type": "array",
           "items": {"type": "integer", "minimum": 0}
         },
-        "last_updated": {"type": "integer", "minimum": 0}
+        "last_updated": {"type": "integer", "minimum": 0},
+        "io_bytes_written": {"type": ["integer", "null"], "minimum": 0},
+        "io_duration_ms": {"type": ["integer", "null"], "minimum": 0},
+        "io_throughput_bytes_per_sec": {"type": ["integer", "null"], "minimum": 0}
       },
       "additionalProperties": false
     },

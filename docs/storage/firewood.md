@@ -108,6 +108,26 @@ the node (configuration reloads only happen on startup), and document the new
 targets alongside telemetry dashboards so on-call staff understand the revised
 expectations.【F:rpp/runtime/config.rs†L1625-L1674】【F:config/storage.toml†L1-L20】
 
+### IO-Budget und Pruning-Throttling {#io-budget-und-pruning-throttling}
+
+Pruning-Zyklen schreiben die erzeugten Beweise und Manifeste unter
+`cf_pruning_*` und exportieren das Volumen über
+`rpp.node.pruning.io_bytes_written`, während `io_duration_ms` und
+`io_throughput_bytes_per_sec` die beobachtete Schreibdauer bzw. den Durchsatz
+pro Zyklus erfassen.【F:rpp/node/src/telemetry/pruning.rs†L21-L125】 Korreliere die
+Werte mit `missing_heights` und `time_remaining_ms`, um IO-Engpässe von leerlauf
+bedingten Stalls zu unterscheiden.
+
+- **Durchsatz dauerhaft < 4 MiB/s:** Stelle sicher, dass `snapshot_dir` und
+  `proof_dir` auf einer lokalen SSD/NVMe liegen, und erhöhe
+  `storage.commit_io_budget_bytes` sowie `storage.compaction_io_budget_bytes`,
+  damit die Hintergrundleistung mit der per-Metrik dokumentierten Erwartung
+  übereinstimmt.【F:storage-firewood/src/state.rs†L202-L220】【F:config/storage.toml†L1-L20】
+- **Backlog fällt trotz Budget nicht:** Pausiere Pruning mit `rppctl pruning pause`,
+  entzerre den IO-Pfad (z. B. dediziertes Volume für Pruning-Artefakte) und
+  setze den Dienst erst fort, wenn der 10‑Minuten-Durchschnitt von
+  `io_throughput_bytes_per_sec` über die kritische Schwelle steigt.
+
 ## Root integrity and failure handling
 
 NodeStore accessors now differentiate between an intentionally empty trie and a
