@@ -214,7 +214,10 @@
     "missing_heights": [4096, 4097, 4098],
     "persisted_path": "/var/lib/rpp/pruning/plan.json",
     "stored_proofs": [4096, 4097],
-    "last_updated": 1700004300
+    "last_updated": 1700004300,
+    "io_bytes_written": 16384,
+    "io_duration_ms": 350,
+    "io_throughput_bytes_per_sec": 46700
   },
   "vrf_threshold": {
     "current": "0x0f"

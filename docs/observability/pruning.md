@@ -35,6 +35,11 @@ the label values; they default to `primary` and `0` when unset.【F:rpp/node/src
   increase signals storage drift.【F:rpp/node/src/telemetry/pruning.rs†L63-L117】【F:rpp/runtime/node.rs†L3200-L3207】
 - **`rpp.node.pruning.stored_proofs`** – histogram showing how many pruning
   proofs synchronised to storage per cycle for each shard/partition.【F:rpp/node/src/telemetry/pruning.rs†L63-L117】【F:rpp/runtime/node.rs†L3200-L3207】
+- **`rpp.node.pruning.io_bytes_written`, `io_duration_ms`, `io_throughput_bytes_per_sec`** –
+  histograms tracking how much data and time each cycle spent persisting pruning
+  artifacts. Correlate the throughput series with `missing_heights` and
+  `time_remaining_ms` to confirm whether slow disks or budgets block backlog
+  reduction.【F:rpp/node/src/telemetry/pruning.rs†L21-L125】【F:rpp/runtime/node.rs†L6245-L6430】
 - **`rpp.node.pruning.retention_depth`** – histogram recording the effective
   retention depth applied to each run; build singe-stat panels to catch override
   mistakes by shard.【F:rpp/node/src/telemetry/pruning.rs†L63-L117】【F:rpp/node/src/services/pruning.rs†L356-L399】
@@ -82,6 +87,12 @@ the label values; they default to `primary` and `0` when unset.【F:rpp/node/src
 - **Slow throughput:** warn if
   `rate(rpp.node.pruning.keys_processed_count{shard="$shard",partition="$partition"}[15m]) < 1` while the backlog stays
   above the retention depth, indicating degraded storage performance.
+- **IO bottleneck while backlog persists:** alert when
+  `avg_over_time(rpp.node.pruning.io_throughput_bytes_per_sec{shard="$shard",partition="$partition"}[10m])`
+  drops below the expected budget and both `missing_heights_sum` and
+  `time_remaining_ms_sum` remain non-zero. Use the pruning IO runbook to decide
+  whether to pause exports, move the pruning directories, or raise the recorded
+  IO budgets.【F:ops/alerts/storage/firewood.yaml†L70-L120】【F:docs/runbooks/observability.md†L115-L148】
 - **Unexpected pause:** notify when
   `increase(rpp.node.pruning.pause_transitions{shard="$shard",partition="$partition",state="paused"}[10m]) > 0` without
   a matching resume within the same window.

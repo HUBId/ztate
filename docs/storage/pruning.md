@@ -7,6 +7,13 @@ state-sync checkpoint before simulating a WAL crash. The recovered node reloads
 both the pruning plan and any transactions staged in the mempool WAL to ensure
 state hashes and proof verification remain consistent across backends.
 
+During recovery and steady-state pruning runs, storage captures
+`io_bytes_written`, `io_duration_ms`, and `io_throughput_bytes_per_sec` so on-call
+staff can correlate backlog reductions with observed disk throughput. Alerts fire
+when throughput lags while `missing_heights` and the ETA stay non-zero; consult
+the pruning IO runbook before raising budgets or moving the pruning artifacts to
+faster disks.【F:rpp/node/src/telemetry/pruning.rs†L21-L125】【F:ops/alerts/storage/firewood.yaml†L70-L120】【F:docs/runbooks/observability.md†L115-L148】
+
 Before any pruning artifacts are rotated, the storage layer now rehydrates the
 latest manifest from disk and compares its height, digests, and checksum with
 the just-committed state root. A mismatch (including missing proof files) aborts

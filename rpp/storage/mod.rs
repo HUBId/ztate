@@ -305,7 +305,7 @@ impl Storage {
         Ok(())
     }
 
-    pub fn persist_pruning_proof(&self, height: u64, proof: &PruningProof) -> ChainResult<()> {
+    pub fn persist_pruning_proof(&self, height: u64, proof: &PruningProof) -> ChainResult<u64> {
         let pruner_state = {
             let pruner = self.pruner.lock();
             pruner.export_state()
@@ -313,10 +313,11 @@ impl Storage {
         let mut kv = self.kv.lock();
         let canonical = CanonicalPruningEnvelope::from(proof.as_ref());
         let data = rpp_pruning::canonical_bincode_options().serialize(&canonical)?;
+        let written_bytes = data.len() as u64;
         kv.put(metadata_key(&pruning_proof_suffix(height)), data);
         Self::persist_pruner_state_raw(&mut kv, &pruner_state)?;
         kv.commit()?;
-        Ok(())
+        Ok(written_bytes)
     }
 
     pub fn load_pruning_proof(&self, height: u64) -> ChainResult<Option<PruningProof>> {
@@ -950,7 +951,7 @@ mod tests {
             .pruning_proof
             .clone()
             .expect("pruning proof for first block");
-        storage.persist_pruning_proof(1, &proof_one)?;
+        let _ = storage.persist_pruning_proof(1, &proof_one)?;
         let root_one = receipt_one.new_root;
 
         drop(storage);
@@ -968,7 +969,7 @@ mod tests {
             .pruning_proof
             .clone()
             .expect("pruning proof for second block");
-        storage.persist_pruning_proof(2, &proof_two)?;
+        let _ = storage.persist_pruning_proof(2, &proof_two)?;
         drop(storage);
 
         let wal_path = temp_dir.path().join("firewood.wal");

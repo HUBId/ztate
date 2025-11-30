@@ -1546,6 +1546,27 @@
                   "type": "integer"
                 },
                 "type": "array"
+              },
+              "io_bytes_written": {
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "io_duration_ms": {
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "io_throughput_bytes_per_sec": {
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
               }
             },
             "required": [

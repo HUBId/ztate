@@ -137,3 +137,33 @@ groups:
             Snapshot replication is more than two minutes behind. Follow the snapshot failover
             playbook to re-route or restart consumers before data gaps widen.
           runbook_url: https://github.com/chainbound/chain/blob/main/docs/runbooks/observability.md#firewood-snapshot-lag
+      - alert: FirewoodPruningIoBottleneckWarning
+        expr: avg_over_time(rpp_node_pruning_io_throughput_bytes_per_sec[10m]) < 4000000
+          and last_over_time(rpp_node_pruning_missing_heights_sum[10m]) > 0
+          and last_over_time(rpp_node_pruning_time_remaining_ms_sum[10m]) > 0
+        for: 10m
+        labels:
+          severity: warning
+          team: storage
+        annotations:
+          summary: Pruning IO throughput is throttling backlog reduction
+          description: >-
+            Pruning cycles have been writing slower than 4 MiB/s for at least ten minutes while
+            missing heights remain. Inspect disk latency, compaction IO budgets, and placement of
+            pruning artifacts before resuming the cadence.
+          runbook_url: https://github.com/chainbound/chain/blob/main/docs/runbooks/observability.md#firewood-pruning-io-bottleneck
+      - alert: FirewoodPruningIoBottleneckCritical
+        expr: avg_over_time(rpp_node_pruning_io_throughput_bytes_per_sec[10m]) < 1000000
+          and last_over_time(rpp_node_pruning_missing_heights_sum[10m]) > 0
+          and last_over_time(rpp_node_pruning_time_remaining_ms_sum[10m]) > 0
+        for: 5m
+        labels:
+          severity: critical
+          team: storage
+        annotations:
+          summary: Pruning IO throughput is saturated
+          description: >-
+            Pruning artifact writes have stayed below 1 MiB/s for five minutes with a remaining
+            backlog. Pause pruning exports, raise IO budgets, or migrate the pruning directories
+            before continuing.
+          runbook_url: https://github.com/chainbound/chain/blob/main/docs/runbooks/observability.md#firewood-pruning-io-bottleneck

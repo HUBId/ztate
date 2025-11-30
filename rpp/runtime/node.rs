@@ -739,6 +739,12 @@ pub struct PruningJobStatus {
     pub last_updated: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub estimated_time_remaining_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub io_bytes_written: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub io_duration_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub io_throughput_bytes_per_sec: Option<u64>,
 }
 
 #[derive(Clone, Debug)]
@@ -6360,6 +6366,8 @@ impl NodeInner {
             let mut previous_cache: Option<Block> = None;
             let mut batch_processed = 0usize;
             let mut batch_index = 0usize;
+            let mut io_bytes_written = 0u64;
+            let mut io_duration = Duration::ZERO;
             for height in missing_heights.iter().copied() {
                 if cancelled || self.pruning_cancelled.swap(false, Ordering::SeqCst) {
                     cancelled = true;
@@ -6401,8 +6409,12 @@ impl NodeInner {
                             previous_block,
                         )?;
 
-                        self.storage
+                        let persist_started = Instant::now();
+                        let written = self
+                            .storage
                             .persist_pruning_proof(height, &block.pruning_proof)?;
+                        io_bytes_written = io_bytes_written.saturating_add(written);
+                        io_duration = io_duration.saturating_add(persist_started.elapsed());
                         stored_proofs.push(height);
                         batch_processed += 1;
                         if batch_processed == chunk_size {
@@ -6442,6 +6454,16 @@ impl NodeInner {
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs();
+            let io_throughput_bytes_per_sec = if io_duration.is_zero() {
+                None
+            } else {
+                Some(
+                    (io_bytes_written as f64 / io_duration.as_secs_f64())
+                        .round()
+                        .max(0.0) as u64,
+                )
+            };
+            let io_duration_ms = (!io_duration.is_zero()).then_some(io_duration.as_millis() as u64);
             let status = PruningJobStatus {
                 plan: state_sync_plan,
                 missing_heights,
@@ -6449,6 +6471,9 @@ impl NodeInner {
                 stored_proofs,
                 last_updated,
                 estimated_time_remaining_ms: None,
+                io_bytes_written: (!io_duration.is_zero()).then_some(io_bytes_written),
+                io_duration_ms,
+                io_throughput_bytes_per_sec,
             };
             if let Some(path) = status.persisted_path.as_ref() {
                 info!(?path, "persisted pruning snapshot plan");
