@@ -28,6 +28,7 @@ use rpp_chain::runtime::node_runtime::node::SnapshotDownloadErrorCode;
 use rpp_chain::runtime::{RuntimeMetrics, TelemetryExporterBuilder};
 use rpp_chain::storage::pruner::receipt::SnapshotCancelReceipt;
 use rpp_chain::storage::Storage;
+use rpp_chain::types::SignedTransaction;
 use rpp_chain::wallet::Wallet;
 use rpp_node_runtime_api::{BootstrapError, BootstrapResult, RuntimeMode, RuntimeOptions};
 use rpp_p2p::{
@@ -185,6 +186,8 @@ enum ValidatorCommand {
     Uptime(UptimeCommand),
     /// Query health endpoints and summarise validator readiness
     Health(HealthCommand),
+    /// Validate batches of signed transactions offline
+    TxValidate(TxBatchValidateCommand),
     /// Run validator setup checks and rotate VRF material
     Setup(ValidatorSetupCommand),
     /// Control snapshot streaming sessions through the RPC service
@@ -283,6 +286,35 @@ struct BackendStatusCommand {
     /// Emit the summary as JSON for automation and alerting pipelines
     #[arg(long, default_value_t = false)]
     json: bool,
+}
+
+#[derive(Args, Clone)]
+struct TxBatchValidateCommand {
+    /// Path to a JSON file containing signed transaction payloads.
+    #[arg(long, value_name = "PATH")]
+    input: PathBuf,
+
+    /// Emit the validation report as JSON for automation.
+    #[arg(long, default_value_t = false)]
+    json: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct TxValidationResult {
+    id: String,
+    from: String,
+    nonce: u64,
+    fee: u64,
+    valid: bool,
+    errors: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct TxBatchReport {
+    total: usize,
+    valid: usize,
+    invalid: usize,
+    results: Vec<TxValidationResult>,
 }
 
 #[derive(Subcommand)]
@@ -681,6 +713,9 @@ where
             }
             Some(ValidatorCommand::Health(command)) => {
                 handle_health_command(command).await.map_err(CliError::from)
+            }
+            Some(ValidatorCommand::TxValidate(command)) => {
+                handle_tx_batch_validation(command).map_err(CliError::from)
             }
             Some(ValidatorCommand::Setup(command)) => run_validator_setup(command).await,
             Some(ValidatorCommand::Snapshot(command)) => handle_snapshot_command(command)
@@ -1149,6 +1184,164 @@ async fn handle_health_command(command: HealthCommand) -> Result<()> {
             code: status.exit_code(),
             message: summary.issues.join("; "),
         }),
+    }
+}
+
+fn handle_tx_batch_validation(command: TxBatchValidateCommand) -> Result<()> {
+    let raw = fs::read_to_string(&command.input)
+        .with_context(|| format!("failed to read {}", command.input.display()))?;
+    let transactions = load_transaction_batch(&raw)?;
+    let report = validate_transaction_batch(&transactions);
+
+    if command.json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        render_tx_batch_report(&report);
+    }
+
+    if report.invalid > 0 {
+        anyhow::bail!("{} invalid transactions detected", report.invalid);
+    }
+
+    Ok(())
+}
+
+fn load_transaction_batch(raw: &str) -> Result<Vec<SignedTransaction>> {
+    if let Ok(batch) = serde_json::from_str::<Vec<SignedTransaction>>(raw) {
+        return Ok(batch);
+    }
+
+    if let Ok(single) = serde_json::from_str::<SignedTransaction>(raw) {
+        return Ok(vec![single]);
+    }
+
+    anyhow::bail!("input did not decode as signed transaction batch")
+}
+
+fn render_tx_batch_report(report: &TxBatchReport) {
+    println!("Transaction batch validation\n");
+    for entry in &report.results {
+        if entry.valid {
+            println!(
+                "[OK] id={} from={} nonce={} fee={}",
+                entry.id, entry.from, entry.nonce, entry.fee
+            );
+        } else {
+            println!(
+                "[FAIL] id={} from={} nonce={} fee={} errors={}",
+                entry.id,
+                entry.from,
+                entry.nonce,
+                entry.fee,
+                entry.errors.join("; ")
+            );
+        }
+    }
+
+    println!(
+        "\nSummary: {} total, {} valid, {} invalid",
+        report.total, report.valid, report.invalid
+    );
+}
+
+fn validate_transaction_batch(transactions: &[SignedTransaction]) -> TxBatchReport {
+    let mut latest_nonce: HashMap<String, u64> = HashMap::new();
+    let mut seen_nonces: HashMap<String, HashSet<u64>> = HashMap::new();
+    let mut results = Vec::new();
+
+    for tx in transactions {
+        let mut errors = Vec::new();
+        if let Err(err) = tx.verify() {
+            errors.push(format!("signature: {err}"));
+        }
+
+        if tx.payload.fee == 0 {
+            errors.push("fee must be greater than zero".to_string());
+        }
+
+        let sender = tx.payload.from.clone();
+        let nonce = tx.payload.nonce;
+        let seen = seen_nonces
+            .entry(sender.clone())
+            .or_insert_with(HashSet::new);
+        if !seen.insert(nonce) {
+            errors.push(format!("nonce {nonce} is duplicated for sender {sender}"));
+        }
+
+        if let Some(previous) = latest_nonce.get(&sender) {
+            if nonce <= *previous {
+                errors.push(format!(
+                    "nonce {nonce} must be greater than previous nonce {previous} for sender {sender}"
+                ));
+            }
+        }
+        latest_nonce.insert(sender.clone(), nonce);
+
+        let valid = errors.is_empty();
+        results.push(TxValidationResult {
+            id: tx.id.to_string(),
+            from: sender,
+            nonce,
+            fee: tx.payload.fee,
+            valid,
+            errors,
+        });
+    }
+
+    let valid_count = results.iter().filter(|entry| entry.valid).count();
+    TxBatchReport {
+        total: results.len(),
+        valid: valid_count,
+        invalid: results.len().saturating_sub(valid_count),
+        results,
+    }
+}
+
+#[cfg(test)]
+mod tx_batch_validation_tests {
+    use super::validate_transaction_batch;
+    use ed25519_dalek::Signer;
+    use rpp_chain::crypto::{address_from_public_key, generate_keypair};
+    use rpp_chain::types::{SignedTransaction, Transaction};
+
+    fn build_signed_transaction(nonce: u64, fee: u64) -> SignedTransaction {
+        let keypair = generate_keypair();
+        let from = address_from_public_key(&keypair.public);
+        let payload = Transaction {
+            from,
+            to: "recipient".into(),
+            amount: 1_000,
+            fee,
+            nonce,
+            memo: None,
+            timestamp: 1,
+        };
+        let signature = keypair.sign(&payload.canonical_bytes());
+
+        SignedTransaction::new(payload, signature, &keypair.public)
+    }
+
+    #[test]
+    fn reports_mixed_batch_results() {
+        let mut valid = build_signed_transaction(1, 10);
+        let mut bad_signature = build_signed_transaction(2, 10);
+        bad_signature.signature = "00".repeat(64);
+        let duplicate_nonce = build_signed_transaction(1, 15);
+
+        let report = validate_transaction_batch(&[valid.clone(), bad_signature, duplicate_nonce]);
+
+        assert_eq!(report.total, 3);
+        assert_eq!(report.valid, 1);
+        assert_eq!(report.invalid, 2);
+        assert!(report.results[0].valid);
+        assert!(report.results[1]
+            .errors
+            .iter()
+            .any(|error| error.contains("signature")));
+        assert!(report.results[2]
+            .errors
+            .iter()
+            .any(|error| error.contains("nonce")));
     }
 }
 

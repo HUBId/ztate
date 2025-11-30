@@ -1,13 +1,19 @@
 #![cfg(feature = "integration")]
 
+use std::fs;
 use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context, Result};
+use ed25519_dalek::Signer;
 use reqwest::blocking::Client;
 use reqwest::StatusCode;
+use rpp_chain::crypto::{address_from_public_key, generate_keypair};
 use tempfile::TempDir;
+
+use rpp_chain::types::{SignedTransaction, Transaction};
+use serde_json::Value;
 
 #[path = "support/mod.rs"]
 mod support;
@@ -137,6 +143,66 @@ fn preflight_passes_for_valid_configuration() -> Result<()> {
         status.success(),
         "preflight should succeed for valid configuration, status: {status}"
     );
+
+    Ok(())
+}
+
+fn sample_signed_transaction_batch() -> Vec<SignedTransaction> {
+    let keypair = generate_keypair();
+    let from = address_from_public_key(&keypair.public);
+
+    let build_tx = |nonce: u64, fee: u64| -> SignedTransaction {
+        let payload = Transaction {
+            from: from.clone(),
+            to: "recipient".into(),
+            amount: 1_000,
+            fee,
+            nonce,
+            memo: None,
+            timestamp: 1,
+        };
+        let signature = keypair.sign(&payload.canonical_bytes());
+
+        SignedTransaction::new(payload, signature, &keypair.public)
+    };
+
+    let mut invalid_signature = build_tx(2, 10);
+    invalid_signature.signature = "00".repeat(64);
+
+    vec![build_tx(1, 10), invalid_signature, build_tx(1, 5)]
+}
+
+#[test]
+fn validator_tx_batch_validation_reports_failures() -> Result<()> {
+    let binary = locate_rpp_node_binary().context("failed to locate rpp-node binary")?;
+    let temp_dir = TempDir::new().context("failed to create temporary directory")?;
+    let batch_path = temp_dir.path().join("transactions.json");
+    let batch = sample_signed_transaction_batch();
+    fs::write(&batch_path, serde_json::to_string(&batch)?).context("failed to write batch")?;
+
+    let output = Command::new(&binary)
+        .arg("validator")
+        .arg("tx-validate")
+        .arg("--input")
+        .arg(&batch_path)
+        .arg("--json")
+        .output()
+        .context("failed to run tx-validate command")?;
+
+    anyhow::ensure!(
+        output.status.code() == Some(1),
+        "expected validation failures to trigger non-zero exit, got {:?}",
+        output.status.code()
+    );
+
+    let report: Value = serde_json::from_slice(&output.stdout).context("invalid JSON output")?;
+    assert_eq!(report["total"], 3);
+    assert_eq!(report["invalid"], 2);
+    assert!(report["results"][1]["errors"][0]
+        .as_str()
+        .map(|value| value.contains("signature"))
+        .unwrap_or(false));
+    assert!(report["results"][2]["errors"].to_string().contains("nonce"));
 
     Ok(())
 }
