@@ -57,3 +57,17 @@ cargo test -p rpp-chain --locked --test pruning_cross_backend -- \
 If the RPP-STARK backend is available, mirror the check with
 `--features backend-rpp-stark` to ensure both zk backends keep wallet state
 stable across snapshot/restore cycles while mempool WAL entries replay.
+
+## Offline transaction validation
+
+Wallet operators can validate batches of signed transactions without reaching a
+node by running:
+
+```sh
+rpp-node validator tx-validate --input /path/to/transactions.json --json
+```
+
+The command verifies signatures, enforces strictly increasing nonces per
+sender, and rejects zero-fee payloads. A non-zero exit code signals that one or
+more entries failed validation so CI pipelines and air-gapped workflows can
+block broadcast attempts before reconnecting.

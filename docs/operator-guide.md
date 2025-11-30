@@ -29,6 +29,14 @@ detected (e.g., missing quorum or wallet signer not ready), and `21` if any
 probe cannot be reached. Use `--json` for automation workflows that need to
 ingest the summarized payloads directly.
 
+For offline change windows or air-gapped reviews, use
+`rpp-node validator tx-validate --input /path/to/transactions.json --json` to
+verify signed transaction batches before releasing them into the mempool. The
+subcommand rejects invalid signatures, zero-fee payloads, and non-incrementing
+nonces with a non-zero exit code; the runtime smoke suite asserts that mixed
+batches still produce a JSON summary operators can archive for audits before
+rerunning with a clean batch.【F:tests/runtime_smoke.rs†L91-L142】
+
 ## API schema guardrails
 
 Node and wallet RPC schemas are snapshotted under `docs/interfaces/snapshots`.

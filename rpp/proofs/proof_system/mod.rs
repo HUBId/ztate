@@ -1310,24 +1310,22 @@ mod tests {
     };
 
     #[cfg(feature = "backend-rpp-stark")]
-    fn oversized_rpp_stark_proof()
-        -> (ProofVerifierRegistry, ChainProof, u32, u32)
-    {
+    fn oversized_rpp_stark_proof() -> (ProofVerifierRegistry, ChainProof, u32, u32) {
         use rpp_stark::backend::params_limit_to_node_bytes;
         use rpp_stark::params::deserialize_params;
         use std::path::Path;
 
         let vectors_dir = Path::new("vendor/rpp-stark/vectors/stwo/mini");
-        let params = std::fs::read(vectors_dir.join("params.bin"))
-            .expect("read RPP-STARK params vector");
+        let params =
+            std::fs::read(vectors_dir.join("params.bin")).expect("read RPP-STARK params vector");
         let public_inputs = std::fs::read(vectors_dir.join("public_inputs.bin"))
             .expect("read RPP-STARK public inputs vector");
-        let mut proof_bytes = std::fs::read(vectors_dir.join("proof.bin"))
-            .expect("read RPP-STARK proof vector");
+        let mut proof_bytes =
+            std::fs::read(vectors_dir.join("proof.bin")).expect("read RPP-STARK proof vector");
 
         let stark_params = deserialize_params(&params).expect("deserialize params");
-        let node_limit = params_limit_to_node_bytes(&stark_params)
-            .expect("params encode a valid proof limit");
+        let node_limit =
+            params_limit_to_node_bytes(&stark_params).expect("params encode a valid proof limit");
         let max_kib = node_limit.div_ceil(1024);
 
         proof_bytes.extend(std::iter::repeat(0u8).take(node_limit as usize / 2 + 1));
@@ -1338,11 +1336,8 @@ mod tests {
 
         let registry = ProofVerifierRegistry::with_max_proof_size_bytes(node_limit as usize)
             .expect("custom proof limit should fit in registry");
-        let chain_proof = ChainProof::RppStark(RppStarkProof::new(
-            params,
-            public_inputs,
-            proof_bytes,
-        ));
+        let chain_proof =
+            ChainProof::RppStark(RppStarkProof::new(params, public_inputs, proof_bytes));
 
         (registry, chain_proof, max_kib, got_kib)
     }
@@ -1364,10 +1359,11 @@ mod tests {
             Err(ChainError::ProofSizeGate {
                 backend,
                 circuit: actual_circuit,
-                error: ProofSizeGateError::ProofTooLarge {
-                    max_kib: actual_max,
-                    got_kib: actual_got,
-                },
+                error:
+                    ProofSizeGateError::ProofTooLarge {
+                        max_kib: actual_max,
+                        got_kib: actual_got,
+                    },
             }) => {
                 assert_eq!(backend, ProofSystemKind::RppStark);
                 assert_eq!(actual_circuit, circuit);

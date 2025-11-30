@@ -8843,6 +8843,7 @@ version = "0.0.13"
 dependencies = [
  "anyhow",
  "clap",
+ "ed25519-dalek",
  "hex",
  "hyper 0.14.31",
  "reqwest 0.12.24",
