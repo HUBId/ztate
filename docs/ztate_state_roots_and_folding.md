@@ -1,5 +1,7 @@
 # Ztate-State, RPP/Pruning-Commitments und Folding-Eingänge
 
+Das Sequenzdiagramm unter [`docs/architecture/ztate_state_folding_interaction.md`](architecture/ztate_state_folding_interaction.md) visualisiert die Schnittstellen zwischen Prover, `ztate/state`, Consensus und Storage, markiert die bestehenden Aggregationsstufen und zeigt, wo der neue Folding-Schritt (`GlobalProof`) eingehängt wird.
+
 ## 1. Aktuelle Commitments und State-Roots
 - **Globale Ztate-State-Commitments:** Das Ledger emittiert einen Satz aus sechs Commitment-Wurzeln (Global-Accounts, UTXO, Reputation, Timetoke, ZSI-Registry, Proof-Registry). Sie werden im Block-Header gespiegelt und bilden den Stand der "ztate"-Substates ab (`global_state_root`, `utxo_root`, `reputation_root`, `timetoke_root`, `zsi_root`, `proof_root`).【F:rpp/proofs/rpp.rs†L377-L406】【F:rpp/runtime/node.rs†L9488-L9510】【F:rpp/storage/ledger.rs†L1180-L1190】
 - **Pruning/Recovery-Roots (RPP):** Jede Pruning-Checkpoint-Datei speichert den gerade committed State-Root und bricht die Rotation ab, falls die manifestierte Wurzel nicht zum Commit passt. Recovery- und Cross-Backend-Drills prüfen zudem, dass der Pruning-Proof für den finalisierten Head gegen den erwarteten State-Root validiert werden kann.【F:docs/storage/pruning.md†L15-L36】【F:docs/storage/pruning.md†L71-L95】
