@@ -21,6 +21,7 @@
 pub mod audit;
 pub mod crash_reports;
 pub mod determinism;
+pub mod folding;
 
 use std::fmt;
 
