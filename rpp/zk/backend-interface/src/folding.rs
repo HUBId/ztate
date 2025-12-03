@@ -1,6 +1,63 @@
-use serde::{Deserialize, Serialize};
+use serde::{de::Error as DeError, Deserialize, Deserializer, Serialize, Serializer};
 
-use crate::{BackendResult, Blake2sHasher};
+use crate::{BackendError, BackendResult, Blake2sHasher};
+
+const INSTANCE_COMMITMENT_MAX_LEN: usize = 64;
+const GLOBAL_PROOF_BYTES_MAX_LEN: usize = 4096;
+const VERIFICATION_KEY_ID_MAX_LEN: usize = 64;
+const PROOF_COMMITMENT_LEN: usize = 32;
+
+/// Fixed-capacity byte container to keep proof artifacts bounded and allocation-free.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FixedBytes<const N: usize> {
+    bytes: [u8; N],
+    len: usize,
+}
+
+impl<const N: usize> FixedBytes<N> {
+    pub fn new(bytes: impl AsRef<[u8]>) -> BackendResult<Self> {
+        let bytes = bytes.as_ref();
+
+        if bytes.len() > N {
+            return Err(BackendError::Failure(format!(
+                "byte payload exceeds fixed capacity ({} > {})",
+                bytes.len(),
+                N
+            )));
+        }
+
+        let mut buffer = [0u8; N];
+        buffer[..bytes.len()].copy_from_slice(bytes);
+
+        Ok(Self {
+            bytes: buffer,
+            len: bytes.len(),
+        })
+    }
+
+    pub fn as_slice(&self) -> &[u8] {
+        &self.bytes[..self.len]
+    }
+}
+
+impl<const N: usize> Serialize for FixedBytes<N> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_bytes(self.as_slice())
+    }
+}
+
+impl<'de, const N: usize> Deserialize<'de> for FixedBytes<N> {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let bytes: Vec<u8> = Deserialize::deserialize(deserializer)?;
+        FixedBytes::new(bytes).map_err(DeError::custom)
+    }
+}
 
 /// Represents the running folding instance (Iᵢ) that evolves as blocks are folded.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -54,23 +111,58 @@ impl GlobalInstance {
 /// Proof artifact tied to a specific global instance.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct GlobalProof {
-    pub instance_commitment: Vec<u8>,
-    pub proof_bytes: Vec<u8>,
-    pub vk_id: String,
+    pub instance_commitment: FixedBytes<INSTANCE_COMMITMENT_MAX_LEN>,
+    pub proof_bytes: FixedBytes<GLOBAL_PROOF_BYTES_MAX_LEN>,
+    pub handle: GlobalProofHandle,
 }
 
 impl GlobalProof {
     pub fn new(
-        instance_commitment: impl Into<Vec<u8>>,
-        proof_bytes: impl Into<Vec<u8>>,
-        vk_id: impl Into<String>,
+        instance_commitment: impl AsRef<[u8]>,
+        proof_bytes: impl AsRef<[u8]>,
+        vk_id: impl AsRef<[u8]>,
+        version: ProofVersion,
+    ) -> BackendResult<Self> {
+        let instance_commitment = FixedBytes::new(instance_commitment)?;
+        let proof_bytes = FixedBytes::new(proof_bytes)?;
+        let vk_id = FixedBytes::new(vk_id)?;
+        let handle = GlobalProofHandle::from_proof_bytes(&proof_bytes, vk_id, version);
+
+        Ok(Self {
+            instance_commitment,
+            proof_bytes,
+            handle,
+        })
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GlobalProofHandle {
+    pub proof_commitment: [u8; PROOF_COMMITMENT_LEN],
+    pub vk_id: FixedBytes<VERIFICATION_KEY_ID_MAX_LEN>,
+    pub version: ProofVersion,
+}
+
+impl GlobalProofHandle {
+    pub fn from_proof_bytes(
+        proof_bytes: &FixedBytes<GLOBAL_PROOF_BYTES_MAX_LEN>,
+        vk_id: FixedBytes<VERIFICATION_KEY_ID_MAX_LEN>,
+        version: ProofVersion,
     ) -> Self {
+        let proof_commitment = Blake2sHasher::hash(proof_bytes.as_slice()).0;
+
         Self {
-            instance_commitment: instance_commitment.into(),
-            proof_bytes: proof_bytes.into(),
-            vk_id: vk_id.into(),
+            proof_commitment,
+            vk_id,
+            version,
         }
     }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ProofVersion {
+    AggregatedV1,
+    NovaV2,
 }
 
 /// Public witness material for the next fold step.
@@ -110,6 +202,7 @@ pub struct MockFoldingBackend;
 #[cfg(any(test, feature = "prover-mock"))]
 impl MockFoldingBackend {
     const VK_ID: &'static str = "mock-folding-vk";
+    const VERSION: ProofVersion = ProofVersion::AggregatedV1;
 }
 
 #[cfg(any(test, feature = "prover-mock"))]
@@ -125,13 +218,20 @@ impl FoldingBackend for MockFoldingBackend {
         let proof_bytes = format!("proof-{}", block_witness.block_number).into_bytes();
 
         let instance_next = GlobalInstance::new(next_index, instance_commitment.clone());
-        let proof_next = GlobalProof::new(instance_commitment, proof_bytes, Self::VK_ID);
+        let proof_next = GlobalProof::new(
+            instance_commitment,
+            proof_bytes,
+            Self::VK_ID.as_bytes(),
+            Self::VERSION,
+        )?;
 
         Ok((instance_next, proof_next))
     }
 
     fn verify(&self, instance: &GlobalInstance, proof: &GlobalProof) -> BackendResult<bool> {
-        Ok(proof.instance_commitment == instance.commitment && proof.vk_id == Self::VK_ID)
+        Ok(proof.instance_commitment.as_slice() == instance.commitment
+            && proof.handle.vk_id.as_slice() == Self::VK_ID.as_bytes()
+            && proof.handle.version == Self::VERSION)
     }
 }
 
@@ -159,7 +259,13 @@ mod tests {
     fn mock_backend_folds_with_deterministic_outputs() {
         let backend = MockFoldingBackend;
         let instance = GlobalInstance::new(0, b"instance-0".to_vec());
-        let proof = GlobalProof::new(b"instance-0", b"proof-0", "mock-folding-vk");
+        let proof = GlobalProof::new(
+            b"instance-0",
+            b"proof-0",
+            "mock-folding-vk",
+            ProofVersion::AggregatedV1,
+        )
+        .expect("mock proof creation succeeds");
         let witness = BlockWitness::new(42, b"payload".to_vec());
 
         let (next_instance, next_proof) = backend
@@ -168,16 +274,23 @@ mod tests {
 
         assert_eq!(next_instance.index, 1);
         assert_eq!(next_instance.commitment, b"instance-1".to_vec());
-        assert_eq!(next_proof.instance_commitment, b"instance-1".to_vec());
-        assert_eq!(next_proof.proof_bytes, b"proof-42".to_vec());
-        assert_eq!(next_proof.vk_id, "mock-folding-vk");
+        assert_eq!(next_proof.instance_commitment.as_slice(), b"instance-1");
+        assert_eq!(next_proof.proof_bytes.as_slice(), b"proof-42");
+        assert_eq!(next_proof.handle.vk_id.as_slice(), b"mock-folding-vk");
+        assert_eq!(next_proof.handle.version, ProofVersion::AggregatedV1);
     }
 
     #[test]
     fn mock_backend_verifies_matching_commitment() {
         let backend = MockFoldingBackend;
         let instance = GlobalInstance::new(5, b"instance-5".to_vec());
-        let proof = GlobalProof::new(b"instance-5", b"proof-5", "mock-folding-vk");
+        let proof = GlobalProof::new(
+            b"instance-5",
+            b"proof-5",
+            "mock-folding-vk",
+            ProofVersion::AggregatedV1,
+        )
+        .expect("mock proof creation succeeds");
 
         assert!(backend
             .verify(&instance, &proof)
@@ -188,7 +301,13 @@ mod tests {
     fn mock_backend_rejects_mismatched_commitment() {
         let backend = MockFoldingBackend;
         let instance = GlobalInstance::new(7, b"instance-7".to_vec());
-        let proof = GlobalProof::new(b"instance-8", b"proof-8", "mock-folding-vk");
+        let proof = GlobalProof::new(
+            b"instance-8",
+            b"proof-8",
+            "mock-folding-vk",
+            ProofVersion::AggregatedV1,
+        )
+        .expect("mock proof creation succeeds");
 
         assert!(!backend
             .verify(&instance, &proof)
