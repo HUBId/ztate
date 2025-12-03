@@ -1,12 +1,14 @@
 use serde::{Deserialize, Serialize};
 
-use crate::BackendResult;
+use crate::{BackendResult, Blake2sHasher};
 
 /// Represents the running folding instance (Iᵢ) that evolves as blocks are folded.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct GlobalInstance {
     pub index: u64,
     pub commitment: Vec<u8>,
+    pub state_commitment: Vec<u8>,
+    pub rpp_commitment: Vec<u8>,
 }
 
 impl GlobalInstance {
@@ -14,7 +16,38 @@ impl GlobalInstance {
         Self {
             index,
             commitment: commitment.into(),
+            state_commitment: Vec::new(),
+            rpp_commitment: Vec::new(),
         }
+    }
+
+    /// Build a global instance deterministically from state and pruning commitments.
+    ///
+    /// The combined commitment is derived by hashing the index, state commitment,
+    /// and pruning commitment in a fixed order. No external state is read or
+    /// mutated, making the helper safe for both prover and validator flows.
+    pub fn from_state_and_rpp(
+        index: u64,
+        state_commitment: impl Into<Vec<u8>>,
+        rpp_commitment: impl Into<Vec<u8>>,
+    ) -> Self {
+        let state_commitment = state_commitment.into();
+        let rpp_commitment = rpp_commitment.into();
+
+        let commitment = derive_combined_commitment(index, &state_commitment, &rpp_commitment);
+
+        Self {
+            index,
+            commitment,
+            state_commitment,
+            rpp_commitment,
+        }
+    }
+
+    /// Return the header fields carried by the instance for downstream
+    /// integrations.
+    pub fn to_header_fields(&self) -> (&[u8], &[u8]) {
+        (&self.state_commitment, &self.rpp_commitment)
     }
 }
 
@@ -102,9 +135,25 @@ impl FoldingBackend for MockFoldingBackend {
     }
 }
 
+fn derive_combined_commitment(
+    index: u64,
+    state_commitment: &[u8],
+    rpp_commitment: &[u8],
+) -> Vec<u8> {
+    let mut preimage = Vec::with_capacity(
+        std::mem::size_of::<u64>() + state_commitment.len() + rpp_commitment.len(),
+    );
+    preimage.extend_from_slice(&index.to_le_bytes());
+    preimage.extend_from_slice(state_commitment);
+    preimage.extend_from_slice(rpp_commitment);
+
+    Blake2sHasher::hash(&preimage).0.to_vec()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Blake2sHasher;
 
     #[test]
     fn mock_backend_folds_with_deterministic_outputs() {
@@ -144,5 +193,49 @@ mod tests {
         assert!(!backend
             .verify(&instance, &proof)
             .expect("mock verification succeeds"));
+    }
+
+    #[test]
+    fn constructs_instance_from_state_and_rpp() {
+        let index = 10u64;
+        let state_commitment = b"state-root".to_vec();
+        let rpp_commitment = b"rpp-root".to_vec();
+
+        let instance = GlobalInstance::from_state_and_rpp(
+            index,
+            state_commitment.clone(),
+            rpp_commitment.clone(),
+        );
+
+        assert_eq!(instance.index, index);
+        assert_eq!(instance.state_commitment, state_commitment);
+        assert_eq!(instance.rpp_commitment, rpp_commitment);
+
+        let mut preimage = Vec::new();
+        preimage.extend_from_slice(&index.to_le_bytes());
+        preimage.extend_from_slice(b"state-root");
+        preimage.extend_from_slice(b"rpp-root");
+
+        let expected_commitment = Blake2sHasher::hash(&preimage).0.to_vec();
+        assert_eq!(instance.commitment, expected_commitment);
+    }
+
+    #[test]
+    fn from_state_and_rpp_is_deterministic() {
+        let base = GlobalInstance::from_state_and_rpp(3, b"state-a", b"rpp-a");
+        let same = GlobalInstance::from_state_and_rpp(3, b"state-a", b"rpp-a");
+        let different = GlobalInstance::from_state_and_rpp(4, b"state-a", b"rpp-a");
+
+        assert_eq!(base.commitment, same.commitment);
+        assert_ne!(base.commitment, different.commitment);
+    }
+
+    #[test]
+    fn header_fields_expose_state_and_rpp_commitments() {
+        let instance = GlobalInstance::from_state_and_rpp(99, b"state-h", b"rpp-h");
+        let (state_header, rpp_header) = instance.to_header_fields();
+
+        assert_eq!(state_header, instance.state_commitment.as_slice());
+        assert_eq!(rpp_header, instance.rpp_commitment.as_slice());
     }
 }
