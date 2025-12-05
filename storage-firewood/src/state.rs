@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 use std::env;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -17,10 +18,12 @@ use crate::{
 
 pub type StateRoot = Hash;
 
-pub const STORAGE_LAYOUT_VERSION: u32 = 1;
+pub const STORAGE_LAYOUT_VERSION: u32 = 2;
 const CF_PRUNING_SNAPSHOTS: &str = "cf_pruning_snapshots";
 const CF_PRUNING_PROOFS: &str = "cf_pruning_proofs";
 const CF_META: &str = "cf_meta";
+const CF_GLOBAL_INSTANCES: &str = "cf_global_instances";
+const CF_GLOBAL_PROOF_TIPS: &str = "cf_global_proof_tips";
 const META_LAYOUT_KEY: &str = "layout_version.json";
 const META_PRUNER_KEY: &str = "pruner_state.json";
 const META_TELEMETRY_KEY: &str = "telemetry.json";
@@ -48,6 +51,8 @@ pub struct FirewoodState {
     snapshots_cf: ColumnFamily,
     proofs_cf: ColumnFamily,
     meta_cf: ColumnFamily,
+    global_instances_cf: Option<ColumnFamily>,
+    global_proof_tips_cf: Option<ColumnFamily>,
     options: StorageOptions,
 }
 
@@ -77,7 +82,6 @@ impl FirewoodState {
             ColumnFamily::open(&base_dir, CF_PRUNING_PROOFS)?
         };
         let meta_cf = ColumnFamily::open(&base_dir, CF_META)?;
-
         let stored_layout = read_layout_version(&meta_cf)?;
         if stored_layout > STORAGE_LAYOUT_VERSION {
             return Err(StateError::UnsupportedLayout {
@@ -95,11 +99,26 @@ impl FirewoodState {
             }
             run_migrations(
                 &meta_cf,
+                &base_dir,
                 stored_layout,
                 STORAGE_LAYOUT_VERSION,
                 options.sync_policy,
             )?;
         }
+
+        let effective_layout = read_layout_version(&meta_cf)?;
+        let global_instances_cf = maybe_open_global_cf(
+            &base_dir,
+            CF_GLOBAL_INSTANCES,
+            effective_layout,
+            options.enable_global_proof_tip,
+        )?;
+        let global_proof_tips_cf = maybe_open_global_cf(
+            &base_dir,
+            CF_GLOBAL_PROOF_TIPS,
+            effective_layout,
+            options.enable_global_proof_tip,
+        )?;
 
         let mut pruner = if let Some(mut persisted) =
             meta_cf.get_json::<PersistedPrunerState>(META_PRUNER_KEY)?
@@ -127,6 +146,8 @@ impl FirewoodState {
             snapshots_cf,
             proofs_cf,
             meta_cf,
+            global_instances_cf,
+            global_proof_tips_cf,
             options,
         }))
     }
@@ -244,6 +265,118 @@ impl FirewoodState {
         tree.get_proof(key)
     }
 
+    pub fn put_global_instance(
+        &self,
+        block_ref: &str,
+        instance: &[u8],
+    ) -> Result<(), StateError> {
+        if !self.options.enable_global_proof_tip {
+            return Ok(());
+        }
+
+        let Some(cf) = &self.global_instances_cf else {
+            return Ok(());
+        };
+
+        cf.put_bytes(
+            block_ref,
+            instance,
+            self.options.sync_policy == SyncPolicy::Always,
+        )?;
+        Ok(())
+    }
+
+    pub fn get_global_instance(&self, block_ref: &str) -> Result<Option<Vec<u8>>, StateError> {
+        let Some(cf) = &self.global_instances_cf else {
+            return Ok(None);
+        };
+
+        Ok(cf.get_bytes(block_ref)?)
+    }
+
+    pub fn iter_global_instances(
+        &self,
+        range: std::ops::RangeInclusive<&str>,
+    ) -> Result<Vec<(String, Vec<u8>)>, StateError> {
+        let Some(cf) = &self.global_instances_cf else {
+            return Ok(Vec::new());
+        };
+
+        let mut entries = Vec::new();
+        for key in cf.list_keys()? {
+            if range.contains(&key.as_str()) {
+                if let Some(value) = cf.get_bytes(&key)? {
+                    entries.push((key.clone(), value));
+                }
+            }
+        }
+        Ok(entries)
+    }
+
+    pub fn delete_global_instance(&self, block_ref: &str) -> Result<(), StateError> {
+        let Some(cf) = &self.global_instances_cf else {
+            return Ok(());
+        };
+        cf.remove(block_ref)?;
+        Ok(())
+    }
+
+    pub fn put_global_proof_tip(
+        &self,
+        tip_ref: &str,
+        proof: &[u8],
+    ) -> Result<(), StateError> {
+        if !self.options.enable_global_proof_tip {
+            return Ok(());
+        }
+
+        let Some(cf) = &self.global_proof_tips_cf else {
+            return Ok(());
+        };
+
+        cf.put_bytes(
+            tip_ref,
+            proof,
+            self.options.sync_policy == SyncPolicy::Always,
+        )?;
+        Ok(())
+    }
+
+    pub fn get_global_proof_tip(&self, tip_ref: &str) -> Result<Option<Vec<u8>>, StateError> {
+        let Some(cf) = &self.global_proof_tips_cf else {
+            return Ok(None);
+        };
+
+        Ok(cf.get_bytes(tip_ref)?)
+    }
+
+    pub fn iter_global_proof_tips(
+        &self,
+        range: std::ops::RangeInclusive<&str>,
+    ) -> Result<Vec<(String, Vec<u8>)>, StateError> {
+        let Some(cf) = &self.global_proof_tips_cf else {
+            return Ok(Vec::new());
+        };
+
+        let mut entries = Vec::new();
+        for key in cf.list_keys()? {
+            if range.contains(&key.as_str()) {
+                if let Some(value) = cf.get_bytes(&key)? {
+                    entries.push((key.clone(), value));
+                }
+            }
+        }
+        Ok(entries)
+    }
+
+    pub fn delete_global_proof_tip(&self, tip_ref: &str) -> Result<(), StateError> {
+        let Some(cf) = &self.global_proof_tips_cf else {
+            return Ok(());
+        };
+        cf.remove(tip_ref)?;
+        Ok(())
+    }
+
     pub(crate) fn load_meta<T: DeserializeOwned>(
         &self,
         key: &str,
@@ -302,6 +435,21 @@ impl From<bincode::Error> for StateError {
 
 fn read_layout_version(meta_cf: &ColumnFamily) -> Result<u32, StateError> {
     Ok(meta_cf.get_json::<u32>(META_LAYOUT_KEY)?.unwrap_or(0))
+}
+
+fn maybe_open_global_cf(
+    base_dir: &Path,
+    name: &str,
+    layout_version: u32,
+    enable_write: bool,
+) -> Result<Option<ColumnFamily>, StateError> {
+    let path = base_dir.join(name);
+    let should_open = layout_version >= 2 || enable_write || path.exists();
+    if should_open {
+        Ok(Some(ColumnFamily::open(base_dir, name)?))
+    } else {
+        Ok(None)
+    }
 }
 
 fn validate_manifest_alignment(
@@ -411,6 +559,7 @@ struct CommitTelemetry {
 
 fn run_migrations(
     meta_cf: &ColumnFamily,
+    base_dir: &Path,
     from: u32,
     to: u32,
     policy: SyncPolicy,
@@ -420,6 +569,11 @@ fn run_migrations(
         match version {
             0 => {
                 write_layout_version(meta_cf, 1, policy)?;
+            }
+            1 => {
+                fs::create_dir_all(base_dir.join(CF_GLOBAL_INSTANCES))?;
+                fs::create_dir_all(base_dir.join(CF_GLOBAL_PROOF_TIPS))?;
+                write_layout_version(meta_cf, 2, policy)?;
             }
             other => {
                 return Err(StateError::UnsupportedLayout {
@@ -510,6 +664,7 @@ pub struct StorageOptions {
     pub commit_io_budget_bytes: u64,
     pub compaction_io_budget_bytes: u64,
     pub retain_snapshots: usize,
+    pub enable_global_proof_tip: bool,
 }
 
 impl Default for StorageOptions {
@@ -521,6 +676,7 @@ impl Default for StorageOptions {
             commit_io_budget_bytes: 64 * 1024 * 1024,
             compaction_io_budget_bytes: 128 * 1024 * 1024,
             retain_snapshots: 3,
+            enable_global_proof_tip: false,
         }
     }
 }

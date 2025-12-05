@@ -277,6 +277,7 @@ fn decode_hash(value: &str) -> Result<Hash, LifecycleError> {
 #[cfg(test)]
 mod tests {
     use super::{decode_hash, SnapshotBundle, SnapshotManifest};
+    use crate::STORAGE_LAYOUT_VERSION;
     use rpp_pruning::COMMITMENT_TAG;
     use std::fs;
     use tempfile::tempdir;
@@ -296,7 +297,7 @@ mod tests {
 
     fn manifest_template() -> SnapshotManifest {
         SnapshotManifest {
-            layout_version: 1,
+            layout_version: STORAGE_LAYOUT_VERSION,
             block_height: 42,
             state_root: hex_digest(1),
             schema_digest: hex_digest(2),
