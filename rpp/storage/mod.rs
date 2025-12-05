@@ -14,6 +14,7 @@ use crate::consensus::ConsensusCertificate;
 use crate::errors::{ChainError, ChainResult};
 use crate::rpp::UtxoOutpoint;
 use crate::state::StoredUtxo;
+use crate::zk::backend_interface::folding::{GlobalInstance, GlobalProof};
 pub mod blueprint;
 pub mod pruner;
 
@@ -32,6 +33,8 @@ const TIP_HASH_KEY: &[u8] = b"tip_hash";
 const TIP_TIMESTAMP_KEY: &[u8] = b"tip_timestamp";
 const TIP_METADATA_KEY: &[u8] = b"tip_metadata";
 const BLOCK_METADATA_PREFIX: &[u8] = b"block_metadata/";
+const GLOBAL_INSTANCE_PREFIX: &[u8] = b"global_instance/";
+const GLOBAL_PROOF_PREFIX: &[u8] = b"global_proof/";
 pub(crate) const PRUNING_PROOF_PREFIX: &[u8] = b"pruning_proofs/";
 pub(crate) const SCHEMA_VERSION_KEY: &[u8] = b"schema_version";
 const WALLET_UTXO_SNAPSHOT_KEY: &[u8] = b"wallet_utxo_snapshot";
@@ -138,6 +141,32 @@ mod interface_schemas {
 pub struct Storage {
     kv: Arc<Mutex<FirewoodKv>>,
     pruner: Arc<Mutex<FirewoodPruner>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GlobalInstanceRecord {
+    pub block_height: u64,
+    pub block_hash: String,
+    pub instance: GlobalInstance,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GlobalProofRecord {
+    pub produced_at_height: u64,
+    pub proof: GlobalProof,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+enum StoredGlobalInstance {
+    V1 { instance: GlobalInstance },
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+enum StoredGlobalProof {
+    V1 {
+        proof: GlobalProof,
+        produced_at_height: u64,
+    },
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -342,6 +371,140 @@ impl Storage {
             }
             None => None,
         })
+    }
+
+    pub fn persist_global_instance_by_block(
+        &self,
+        chain_id: &str,
+        block_height: u64,
+        block_hash: &str,
+        instance: &GlobalInstance,
+    ) -> ChainResult<()> {
+        let record = StoredGlobalInstance::V1 {
+            instance: instance.clone(),
+        };
+        let encoded = bincode::serialize(&record)?;
+        let key = metadata_key(&global_instance_suffix(chain_id, block_height, block_hash));
+        let mut kv = self.kv.lock();
+        kv.put(key, encoded);
+        kv.commit()?;
+        Ok(())
+    }
+
+    pub fn load_global_instance_by_block(
+        &self,
+        chain_id: &str,
+        block_height: u64,
+        block_hash: &str,
+    ) -> ChainResult<Option<GlobalInstance>> {
+        let kv = self.kv.lock();
+        let key = metadata_key(&global_instance_suffix(chain_id, block_height, block_hash));
+        let Some(bytes) = kv.get(&key) else {
+            return Ok(None);
+        };
+
+        let stored: StoredGlobalInstance = bincode::deserialize(&bytes)?;
+        match stored {
+            StoredGlobalInstance::V1 { instance } => Ok(Some(instance)),
+        }
+    }
+
+    pub fn iter_global_instances_in_range(
+        &self,
+        chain_id: &str,
+        start_height: u64,
+        end_height: u64,
+    ) -> ChainResult<Vec<GlobalInstanceRecord>> {
+        if start_height > end_height {
+            return Ok(Vec::new());
+        }
+
+        let prefix = metadata_key(&global_instance_chain_prefix(chain_id));
+        let entries: Vec<(Vec<u8>, Vec<u8>)> = {
+            let kv = self.kv.lock();
+            kv.scan_prefix(&prefix).collect()
+        };
+
+        let mut records = Vec::new();
+        for (key, value) in entries {
+            let suffix = key
+                .get(prefix.len()..)
+                .ok_or_else(|| ChainError::Config("malformed global instance key".into()))?;
+            if suffix.len() < 17 || suffix[16] != b'/' {
+                return Err(ChainError::Config("invalid global instance suffix".into()));
+            }
+            let height = u64::from_str_radix(
+                std::str::from_utf8(&suffix[..16])
+                    .map_err(|err| ChainError::Config(format!("invalid height utf8: {err}")))?,
+                16,
+            )
+            .map_err(|err| ChainError::Config(format!("invalid height encoding: {err}")))?;
+            if height < start_height || height > end_height {
+                continue;
+            }
+            let block_hash = std::str::from_utf8(&suffix[17..])
+                .map_err(|err| ChainError::Config(format!("invalid block hash utf8: {err}")))?
+                .to_string();
+            let stored: StoredGlobalInstance = bincode::deserialize(&value)?;
+            let instance = match stored {
+                StoredGlobalInstance::V1 { instance } => instance,
+            };
+            records.push(GlobalInstanceRecord {
+                block_height: height,
+                block_hash,
+                instance,
+            });
+        }
+
+        Ok(records)
+    }
+
+    pub fn persist_global_proof_by_tip(
+        &self,
+        chain_id: &str,
+        tip_height: u64,
+        tip_hash: &str,
+        produced_at_height: u64,
+        proof: Option<&GlobalProof>,
+    ) -> ChainResult<()> {
+        let Some(proof) = proof else {
+            return Ok(());
+        };
+
+        let record = StoredGlobalProof::V1 {
+            proof: proof.clone(),
+            produced_at_height,
+        };
+        let encoded = bincode::serialize(&record)?;
+        let key = metadata_key(&global_proof_suffix(chain_id, tip_height, tip_hash));
+        let mut kv = self.kv.lock();
+        kv.put(key, encoded);
+        kv.commit()?;
+        Ok(())
+    }
+
+    pub fn load_global_proof_by_tip(
+        &self,
+        chain_id: &str,
+        tip_height: u64,
+        tip_hash: &str,
+    ) -> ChainResult<Option<GlobalProofRecord>> {
+        let kv = self.kv.lock();
+        let key = metadata_key(&global_proof_suffix(chain_id, tip_height, tip_hash));
+        let Some(bytes) = kv.get(&key) else {
+            return Ok(None);
+        };
+
+        let stored: StoredGlobalProof = bincode::deserialize(&bytes)?;
+        match stored {
+            StoredGlobalProof::V1 {
+                proof,
+                produced_at_height,
+            } => Ok(Some(GlobalProofRecord {
+                produced_at_height,
+                proof,
+            })),
+        }
     }
 
     pub fn persist_utxo_snapshot(
@@ -738,6 +901,39 @@ fn metadata_key(suffix: &[u8]) -> Vec<u8> {
     key
 }
 
+fn global_instance_suffix(chain_id: &str, block_height: u64, block_hash: &str) -> Vec<u8> {
+    let mut suffix = Vec::with_capacity(
+        GLOBAL_INSTANCE_PREFIX.len() + chain_id.len() + block_hash.len() + 1 + 16 + 1,
+    );
+    suffix.extend_from_slice(GLOBAL_INSTANCE_PREFIX);
+    suffix.extend_from_slice(chain_id.as_bytes());
+    suffix.push(b'/');
+    suffix.extend_from_slice(format!("{block_height:016x}").as_bytes());
+    suffix.push(b'/');
+    suffix.extend_from_slice(block_hash.as_bytes());
+    suffix
+}
+
+fn global_instance_chain_prefix(chain_id: &str) -> Vec<u8> {
+    let mut suffix = Vec::with_capacity(GLOBAL_INSTANCE_PREFIX.len() + chain_id.len() + 1);
+    suffix.extend_from_slice(GLOBAL_INSTANCE_PREFIX);
+    suffix.extend_from_slice(chain_id.as_bytes());
+    suffix.push(b'/');
+    suffix
+}
+
+fn global_proof_suffix(chain_id: &str, tip_height: u64, tip_hash: &str) -> Vec<u8> {
+    let mut suffix =
+        Vec::with_capacity(GLOBAL_PROOF_PREFIX.len() + chain_id.len() + tip_hash.len() + 18);
+    suffix.extend_from_slice(GLOBAL_PROOF_PREFIX);
+    suffix.extend_from_slice(chain_id.as_bytes());
+    suffix.push(b'/');
+    suffix.extend_from_slice(format!("{tip_height:016x}").as_bytes());
+    suffix.push(b'/');
+    suffix.extend_from_slice(tip_hash.as_bytes());
+    suffix
+}
+
 fn block_metadata_suffix(height: u64) -> Vec<u8> {
     let mut suffix = Vec::with_capacity(BLOCK_METADATA_PREFIX.len() + 8);
     suffix.extend_from_slice(BLOCK_METADATA_PREFIX);
@@ -770,6 +966,7 @@ mod tests {
         pruning_from_previous, Block, BlockHeader, BlockMetadata, BlockProofBundle, ChainProof,
         PruningProof, RecursiveProof,
     };
+    use crate::zk::backend_interface::folding::ProofVersion;
     use ed25519_dalek::Signature;
     use hex;
     use rpp_pruning::{
@@ -850,6 +1047,67 @@ mod tests {
             commitment_proof: CommitmentSchemeProofData::default(),
             fri_proof: FriProof::default(),
         }
+    }
+
+    #[test]
+    fn global_instances_roundtrip() {
+        let dir = tempdir().expect("tempdir");
+        let storage = Storage::open(dir.path()).expect("open storage");
+        let instance = GlobalInstance::from_state_and_rpp(7, b"state", b"rpp");
+        let chain_id = "chain-A";
+        let block_hash = "block-hash";
+
+        storage
+            .persist_global_instance_by_block(chain_id, 42, block_hash, &instance)
+            .expect("persist instance");
+        storage
+            .persist_global_instance_by_block(chain_id, 100, "other-hash", &instance)
+            .expect("persist instance outside range");
+
+        let loaded = storage
+            .load_global_instance_by_block(chain_id, 42, block_hash)
+            .expect("load instance")
+            .expect("instance present");
+        assert_eq!(loaded, instance);
+
+        let iterated = storage
+            .iter_global_instances_in_range(chain_id, 40, 60)
+            .expect("iterate instances");
+        assert_eq!(iterated.len(), 1);
+        assert_eq!(iterated[0].block_height, 42);
+        assert_eq!(iterated[0].block_hash, block_hash);
+        assert_eq!(iterated[0].instance, instance);
+    }
+
+    #[test]
+    fn global_proof_persistence_is_optional() {
+        let dir = tempdir().expect("tempdir");
+        let storage = Storage::open(dir.path()).expect("open storage");
+        let chain_id = "chain-B";
+        let tip_hash = "tip-hash";
+
+        storage
+            .persist_global_proof_by_tip(chain_id, 5, tip_hash, 3, None)
+            .expect("skip optional proof");
+        assert!(
+            storage
+                .load_global_proof_by_tip(chain_id, 5, tip_hash)
+                .expect("load optional proof")
+                .is_none()
+        );
+
+        let proof = GlobalProof::new(b"ic", b"proof-bytes", b"vk", ProofVersion::AggregatedV1)
+            .expect("construct proof");
+        storage
+            .persist_global_proof_by_tip(chain_id, 5, tip_hash, 4, Some(&proof))
+            .expect("persist proof");
+
+        let loaded = storage
+            .load_global_proof_by_tip(chain_id, 5, tip_hash)
+            .expect("load proof")
+            .expect("proof present");
+        assert_eq!(loaded.produced_at_height, 4);
+        assert_eq!(loaded.proof, proof);
     }
 
     fn dummy_pruning_proof() -> StarkProof {
