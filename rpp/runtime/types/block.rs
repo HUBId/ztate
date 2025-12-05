@@ -37,6 +37,7 @@ use super::{
     identity::{IDENTITY_ATTESTATION_GOSSIP_MIN, IDENTITY_ATTESTATION_QUORUM},
     Address, AttestedIdentityRequest, BlockProofBundle, ChainProof, SignedTransaction, UptimeProof,
 };
+use crate::proof_backend::folding::{GlobalInstance, GlobalProofHandle, ProofVersion};
 
 use rpp_pruning::{
     BlockHeight, Commitment, DomainTag, FirewoodEnvelope, ParameterVersion, ProofSegment,
@@ -257,6 +258,22 @@ pub(crate) mod serde_pruning_proof {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct GlobalProofHandleSummary {
+    /// Blake2s commitment to the proof bytes used for recursive verification.
+    pub proof_commitment: String,
+    /// Identifier of the verification key that should be used to check the proof.
+    pub vk_id: String,
+    /// Semantic proof version to keep handles stable across upgrades.
+    pub version: String,
+}
+
+/// Canonical block header used across RPC and gossip transports.
+///
+/// The header uses Serde defaults so additional fields added in later versions are
+/// optional and omitted when empty. Serde ignores unknown fields when
+/// deserializing, which allows older clients to skip over new, optional
+/// metadata without failing to parse previously valid messages.
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct BlockHeader {
     pub height: u64,
     pub previous_hash: String,
@@ -276,6 +293,15 @@ pub struct BlockHeader {
     pub proposer: Address,
     pub leader_tier: String,
     pub leader_timetoke: u64,
+    /// Hex-encoded folding instance commitment derived from the global
+    /// aggregator state. Optional for forward/backward compatibility.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub global_instance_commitment: Option<String>,
+    /// Compact handle for the recursive proof that attests to the global
+    /// folding instance. Optional to avoid forcing older clients to decode
+    /// proof-specific metadata.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub global_proof_handle: Option<GlobalProofHandleSummary>,
 }
 
 impl BlockHeader {
@@ -316,6 +342,8 @@ impl BlockHeader {
             proposer,
             leader_tier,
             leader_timetoke,
+            global_instance_commitment: None,
+            global_proof_handle: None,
             timestamp: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
@@ -330,6 +358,54 @@ impl BlockHeader {
     pub fn hash(&self) -> [u8; 32] {
         let bytes = self.canonical_bytes();
         Blake2sHasher::hash(bytes.as_slice()).into()
+    }
+
+    /// Attach global folding metadata derived from a [`GlobalInstance`].
+    ///
+    /// The instance commitment is recomputed using
+    /// [`GlobalInstance::to_header_fields`] to avoid coupling to the instance's
+    /// internal layout. The optional proof handle is stored in a compact,
+    /// versioned summary so header consumers can fetch proofs by ID instead of
+    /// embedding the full payload.
+    pub fn with_global_instance(
+        mut self,
+        instance: &GlobalInstance,
+        proof_handle: Option<&GlobalProofHandle>,
+    ) -> Self {
+        let (state_commitment, rpp_commitment) = instance.to_header_fields();
+
+        let mut preimage = Vec::with_capacity(
+            std::mem::size_of::<u64>() + state_commitment.len() + rpp_commitment.len(),
+        );
+        preimage.extend_from_slice(&instance.index.to_le_bytes());
+        preimage.extend_from_slice(state_commitment);
+        preimage.extend_from_slice(rpp_commitment);
+
+        let instance_commitment = Blake2sHasher::hash(&preimage);
+        self.global_instance_commitment = Some(hex::encode(<[u8; 32]>::from(instance_commitment)));
+
+        if let Some(handle) = proof_handle {
+            self.global_proof_handle = Some(GlobalProofHandleSummary::from(handle));
+        }
+
+        self
+    }
+}
+
+impl From<&GlobalProofHandle> for GlobalProofHandleSummary {
+    fn from(handle: &GlobalProofHandle) -> Self {
+        Self {
+            proof_commitment: hex::encode(handle.proof_commitment),
+            vk_id: hex::encode(handle.vk_id.as_slice()),
+            version: proof_version_label(handle.version).to_string(),
+        }
+    }
+}
+
+fn proof_version_label(version: ProofVersion) -> &'static str {
+    match version {
+        ProofVersion::AggregatedV1 => "aggregated-v1",
+        ProofVersion::NovaV2 => "nova-v2",
     }
 }
 

@@ -108,9 +108,20 @@
         "timestamp": {"type": "integer", "minimum": 0},
         "proposer": {"type": "string"},
         "leader_tier": {"type": "string"},
-        "leader_timetoke": {"type": "integer", "minimum": 0}
+        "leader_timetoke": {"type": "integer", "minimum": 0},
+        "global_instance_commitment": {"type": "string"},
+        "global_proof_handle": {
+          "type": "object",
+          "required": ["proof_commitment", "vk_id", "version"],
+          "properties": {
+            "proof_commitment": {"type": "string"},
+            "vk_id": {"type": "string"},
+            "version": {"type": "string"}
+          },
+          "additionalProperties": false
+        }
       },
-      "additionalProperties": false
+      "additionalProperties": true
     },
     "AttestedIdentityRequest": {
       "type": "object",
