@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 use std::convert::TryInto;
+use std::ops::RangeInclusive;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -15,6 +16,7 @@ use crate::errors::{ChainError, ChainResult};
 use crate::rpp::UtxoOutpoint;
 use crate::state::StoredUtxo;
 use crate::zk::backend_interface::folding::{GlobalInstance, GlobalProof};
+use tracing::{info, warn};
 pub mod blueprint;
 pub mod pruner;
 
@@ -141,6 +143,20 @@ mod interface_schemas {
 pub struct Storage {
     kv: Arc<Mutex<FirewoodKv>>,
     pruner: Arc<Mutex<FirewoodPruner>>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PrunedProofStats {
+    pub scanned: u64,
+    pub pruned: u64,
+    pub retained: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TipReference {
+    pub chain_id: String,
+    pub height: u64,
+    pub hash: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -373,6 +389,70 @@ impl Storage {
         })
     }
 
+    pub fn prune_pruning_proofs(
+        &self,
+        finalized_height: u64,
+        safety_margin: u64,
+        tip_window: RangeInclusive<u64>,
+    ) -> ChainResult<PrunedProofStats> {
+        let retain_floor = finalized_height.saturating_sub(safety_margin);
+        let (tip_start, tip_end) = (*tip_window.start(), *tip_window.end());
+        let prefix = metadata_key(PRUNING_PROOF_PREFIX);
+        let prefix_len = prefix.len();
+
+        let mut kv = self.kv.lock();
+        let mut stats = PrunedProofStats::default();
+        let mut deletes = Vec::new();
+
+        for (key, _) in kv.scan_prefix(&prefix) {
+            stats.scanned += 1;
+            if key.len() < prefix_len + 8 {
+                warn!(
+                    ?key,
+                    "skipping malformed pruning proof key while pruning old proofs"
+                );
+                continue;
+            }
+
+            let Ok(height_bytes) = <[u8; 8]>::try_from(&key[prefix_len..prefix_len + 8]) else {
+                warn!(
+                    ?key,
+                    "unable to parse pruning proof height while pruning old proofs"
+                );
+                continue;
+            };
+            let height = u64::from_be_bytes(height_bytes);
+
+            let in_tip_window = (tip_start..=tip_end).contains(&height);
+            if height < retain_floor && !in_tip_window {
+                deletes.push(key);
+                stats.pruned += 1;
+            } else {
+                stats.retained += 1;
+            }
+        }
+
+        for key in &deletes {
+            kv.delete(key);
+        }
+
+        if !deletes.is_empty() {
+            kv.commit()?;
+        }
+
+        info!(
+            retain_floor,
+            tip_start,
+            tip_end,
+            scanned = stats.scanned,
+            pruned = stats.pruned,
+            retained = stats.retained,
+            "pruned historical pruning proofs beyond finalized checkpoint"
+        );
+
+        Ok(stats)
+    }
+
     pub fn persist_global_instance_by_block(
         &self,
         chain_id: &str,
@@ -505,6 +585,40 @@ impl Storage {
                 proof,
             })),
         }
+    }
+
+    pub fn load_or_rebuild_global_proof_by_tip<R>(
+        &self,
+        tip_ref: &TipReference,
+        rpp_state: &R,
+        rebuild: impl Fn(&TipReference, &R) -> ChainResult<(GlobalProof, u64)>,
+    ) -> ChainResult<Option<GlobalProofRecord>> {
+        if let Some(record) =
+            self.load_global_proof_by_tip(&tip_ref.chain_id, tip_ref.height, &tip_ref.hash)?
+        {
+            return Ok(Some(record));
+        }
+
+        info!(
+            height = tip_ref.height,
+            hash = %tip_ref.hash,
+            chain = %tip_ref.chain_id,
+            "global proof missing at tip, attempting rebuild from RPP state"
+        );
+
+        let (proof, produced_at_height) = rebuild(tip_ref, rpp_state)?;
+        self.persist_global_proof_by_tip(
+            &tip_ref.chain_id,
+            tip_ref.height,
+            &tip_ref.hash,
+            produced_at_height,
+            Some(&proof),
+        )?;
+
+        Ok(Some(GlobalProofRecord {
+            produced_at_height,
+            proof,
+        }))
     }
 
     pub fn persist_utxo_snapshot(
@@ -1089,12 +1203,10 @@ mod tests {
         storage
             .persist_global_proof_by_tip(chain_id, 5, tip_hash, 3, None)
             .expect("skip optional proof");
-        assert!(
-            storage
-                .load_global_proof_by_tip(chain_id, 5, tip_hash)
-                .expect("load optional proof")
-                .is_none()
-        );
+        assert!(storage
+            .load_global_proof_by_tip(chain_id, 5, tip_hash)
+            .expect("load optional proof")
+            .is_none());
 
         let proof = GlobalProof::new(b"ic", b"proof-bytes", b"vk", ProofVersion::AggregatedV1)
             .expect("construct proof");

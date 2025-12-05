@@ -14,6 +14,14 @@ when throughput lags while `missing_heights` and the ETA stay non-zero; consult
 the pruning IO runbook before raising budgets or moving the pruning artifacts to
 faster disks.【F:rpp/node/src/telemetry/pruning.rs†L21-L125】【F:ops/alerts/storage/firewood.yaml†L70-L120】【F:docs/runbooks/observability.md†L115-L148】
 
+Pruning proofs are only removed once they are older than the finalized
+checkpoint minus an operator-defined safety margin (`H_finalized - k`). The
+pruner keeps every proof inside the current RPP tip window so the proof pipeline
+can stitch together the next global proof without gaps. The storage layer also
+attempts to rebuild any missing tip-level global proof from the retained RPP
+state before pruning proceeds, guaranteeing that the retained proof fragments
+plus the tip window are sufficient to regenerate the canonical artifact.
+
 Before any pruning artifacts are rotated, the storage layer now rehydrates the
 latest manifest from disk and compares its height, digests, and checksum with
 the just-committed state root. A mismatch (including missing proof files) aborts

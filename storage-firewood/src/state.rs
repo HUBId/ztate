@@ -265,11 +265,7 @@ impl FirewoodState {
         tree.get_proof(key)
     }
 
-    pub fn put_global_instance(
-        &self,
-        block_ref: &str,
-        instance: &[u8],
-    ) -> Result<(), StateError> {
+    pub fn put_global_instance(&self, block_ref: &str, instance: &[u8]) -> Result<(), StateError> {
         if !self.options.enable_global_proof_tip {
             return Ok(());
         }
@@ -321,11 +317,7 @@ impl FirewoodState {
         Ok(())
     }
 
-    pub fn put_global_proof_tip(
-        &self,
-        tip_ref: &str,
-        proof: &[u8],
-    ) -> Result<(), StateError> {
+    pub fn put_global_proof_tip(&self, tip_ref: &str, proof: &[u8]) -> Result<(), StateError> {
         if !self.options.enable_global_proof_tip {
             return Ok(());
         }
