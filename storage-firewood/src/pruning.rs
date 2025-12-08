@@ -7,6 +7,7 @@ use rpp_pruning::{
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use tracing::info;
 
 const SNAPSHOT_PREFIX: &[u8] = b"fw-pruning-snapshot";
 const SEGMENT_PREFIX: &[u8] = b"fw-pruning-segment";
@@ -374,7 +375,7 @@ impl FirewoodPruner {
             &commitment,
         );
 
-        Envelope::new(
+        let envelope = Envelope::new(
             self.schema_version,
             self.parameter_version,
             snapshot,
@@ -382,7 +383,18 @@ impl FirewoodPruner {
             commitment,
             binding_digest,
         )
-        .expect("binding digest must carry the envelope tag")
+        .expect("binding digest must carry the envelope tag");
+
+        info!(
+            target: "pruning.firewood",
+            block_height = block_id,
+            schema_version = %self.schema_version,
+            parameter_version = %self.parameter_version,
+            retained = self.retain,
+            "pruning snapshot updated",
+        );
+
+        envelope
     }
 
     pub fn verify_with_config(&self, root: Hash, proof: &Envelope) -> bool {

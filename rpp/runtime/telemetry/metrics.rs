@@ -1241,6 +1241,9 @@ pub struct ProofMetrics {
     generation_size: EnumU64Histogram<ProofKind>,
     generation_total: EnumCounter<ProofKind>,
     verification_duration: Histogram<f64>,
+    global_verification_duration: Histogram<f64>,
+    global_verification_size: Histogram<u64>,
+    global_verification_failures: Counter<u64>,
     verification_outcomes: Counter<u64>,
     verification_success_ratio: Histogram<f64>,
     incompatible_proofs: Counter<u64>,
@@ -1291,6 +1294,21 @@ impl ProofMetrics {
                     "Duration of proof verification for the RPP-STARK backend in seconds",
                 )
                 .with_unit("s")
+                .build(),
+            global_verification_duration: meter
+                .f64_histogram("rpp.runtime.global_proof.verify_ms")
+                .with_description("Duration of global proof verification in milliseconds")
+                .with_unit("ms")
+                .build(),
+            global_verification_size: meter
+                .u64_histogram("rpp.runtime.global_proof.bytes")
+                .with_description("Serialized byte length for verified global proofs")
+                .with_unit("By")
+                .build(),
+            global_verification_failures: meter
+                .u64_counter("rpp.runtime.global_proof.failures")
+                .with_description("Total failed global proof verifications")
+                .with_unit("1")
                 .build(),
             verification_outcomes: meter
                 .u64_counter("rpp.runtime.proof.verification.outcomes")
@@ -1405,6 +1423,32 @@ impl ProofMetrics {
         let attributes = verification_attributes(backend, kind, circuit);
         self.verification_duration
             .record(duration.as_secs_f64(), &attributes);
+    }
+
+    pub fn record_global_verification(
+        &self,
+        height: u64,
+        vk_id: &str,
+        version: &str,
+        proof_bytes: u64,
+        duration: Duration,
+        success: bool,
+    ) {
+        let attributes = [
+            KeyValue::new("height", height as i64),
+            KeyValue::new("vk_id", vk_id.to_owned()),
+            KeyValue::new("version", version.to_owned()),
+            KeyValue::new("result", if success { "ok" } else { "err" }),
+        ];
+
+        self.global_verification_duration
+            .record(duration.as_secs_f64() * 1000.0, &attributes);
+        self.global_verification_size
+            .record(proof_bytes, &attributes);
+
+        if !success {
+            self.global_verification_failures.add(1, &attributes);
+        }
     }
 
     pub fn observe_verification_stage_duration(

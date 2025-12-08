@@ -16,6 +16,7 @@ rpp-pruning = { path = "../rpp/pruning" }
 metrics = { workspace = true }
 sha2 = { workspace = true }
 hex = { workspace = true }
+tracing = { workspace = true }
 
 [dev-dependencies]
 proptest = "=1.8.0"

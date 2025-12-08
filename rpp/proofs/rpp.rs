@@ -16,6 +16,7 @@ use crate::types::Address;
 use crate::types::PruningProof;
 use crate::types::SignedTransaction;
 use rayon::prelude::*;
+use tracing::info;
 
 /// 32-byte digest representing a commitment root.
 pub type CommitmentDigest = [u8; 32];
@@ -737,6 +738,13 @@ pub fn produce_block_witness(
         .build()?;
 
     witness.validate(block.transactions.len(), expected_depth)?;
+    info!(
+        target = "proofs.block_witness",
+        block_height = block.header.height,
+        tx_count = block.transactions.len(),
+        pruning_proofs = witness.pruning_proofs.len(),
+        "block witness assembled",
+    );
     Ok(witness)
 }
 
