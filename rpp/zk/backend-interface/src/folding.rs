@@ -10,6 +10,29 @@ const VERIFICATION_KEY_ID_MAX_LEN: usize = 64;
 const PROOF_COMMITMENT_LEN: usize = 32;
 const BLOCK_WITNESS_PAYLOAD_MAX_LEN: usize = 4096;
 
+#[derive(Clone, Copy, Debug)]
+enum FoldPipelineRejectCode {
+    BlockIndexReused,
+    BlockWitnessEmpty,
+    BlockWitnessTooLarge,
+    MissingCommitment,
+    ProofInstanceMismatch,
+    BackendRejected,
+}
+
+impl FoldPipelineRejectCode {
+    fn as_str(&self) -> &'static str {
+        match self {
+            FoldPipelineRejectCode::BlockIndexReused => "FOLD-STEP-001",
+            FoldPipelineRejectCode::BlockWitnessEmpty => "FOLD-STEP-002",
+            FoldPipelineRejectCode::BlockWitnessTooLarge => "FOLD-STEP-003",
+            FoldPipelineRejectCode::MissingCommitment => "FOLD-STEP-010",
+            FoldPipelineRejectCode::ProofInstanceMismatch => "FOLD-STEP-011",
+            FoldPipelineRejectCode::BackendRejected => "FOLD-STEP-099",
+        }
+    }
+}
+
 /// Fixed-capacity byte container to keep proof artifacts bounded and allocation-free.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FixedBytes<const N: usize> {
@@ -394,25 +417,44 @@ pub fn fold_pipeline_step(
 ) -> BackendResult<(GlobalInstance, GlobalProof)> {
     let start = Instant::now();
 
+    let telemetry_reject = |code: FoldPipelineRejectCode, detail: String| {
+        warn!(
+            target: "folding.pipeline",
+            code = code.as_str(),
+            previous_index = instance_prev.index,
+            witness_block = block_witness.block_number,
+            detail = %detail,
+            "fold pipeline rejected",
+        );
+        BackendError::Failure(format!("{}: {}", code.as_str(), detail))
+    };
+
     if block_witness.block_number <= instance_prev.index {
-        return Err(BackendError::Failure(format!(
-            "block number {} must exceed current instance index {}",
-            block_witness.block_number, instance_prev.index
-        )));
+        return Err(telemetry_reject(
+            FoldPipelineRejectCode::BlockIndexReused,
+            format!(
+                "block number {} must exceed current instance index {}",
+                block_witness.block_number, instance_prev.index
+            ),
+        ));
     }
 
     if block_witness.payload.is_empty() {
-        return Err(BackendError::Failure(
+        return Err(telemetry_reject(
+            FoldPipelineRejectCode::BlockWitnessEmpty,
             "block witness payload cannot be empty".into(),
         ));
     }
 
     if block_witness.payload.len() > BLOCK_WITNESS_PAYLOAD_MAX_LEN {
-        return Err(BackendError::Failure(format!(
-            "block witness payload exceeds limit ({} > {})",
-            block_witness.payload.len(),
-            BLOCK_WITNESS_PAYLOAD_MAX_LEN
-        )));
+        return Err(telemetry_reject(
+            FoldPipelineRejectCode::BlockWitnessTooLarge,
+            format!(
+                "block witness payload exceeds limit ({} > {})",
+                block_witness.payload.len(),
+                BLOCK_WITNESS_PAYLOAD_MAX_LEN
+            ),
+        ));
     }
 
     if instance_prev.commitment.is_empty()
@@ -433,13 +475,15 @@ pub fn fold_pipeline_step(
     }
 
     if instance_prev.commitment.is_empty() {
-        return Err(BackendError::Failure(
+        return Err(telemetry_reject(
+            FoldPipelineRejectCode::MissingCommitment,
             "global instance is missing a commitment and combination inputs".into(),
         ));
     }
 
     if proof_prev.instance_commitment.as_slice() != instance_prev.commitment.as_slice() {
-        return Err(BackendError::Failure(
+        return Err(telemetry_reject(
+            FoldPipelineRejectCode::ProofInstanceMismatch,
             "previous proof commitment does not match global instance".into(),
         ));
     }
@@ -492,13 +536,20 @@ pub fn fold_pipeline_step(
             Ok((instance_next, proof_next))
         }
         Err(err) => {
+            let annotated = format!("{}", err);
             warn!(
+                target: "folding.pipeline",
+                code = FoldPipelineRejectCode::BackendRejected.as_str(),
                 previous_index = instance_prev.index,
                 witness_block = block_witness.block_number,
-                error = %err,
-                "folding step failed"
+                error = %annotated,
+                "folding step failed",
             );
-            Err(err)
+            Err(BackendError::Failure(format!(
+                "{}: {}",
+                FoldPipelineRejectCode::BackendRejected.as_str(),
+                annotated
+            )))
         }
     }
 }
