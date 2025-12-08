@@ -37,7 +37,7 @@ use super::{
     identity::{IDENTITY_ATTESTATION_GOSSIP_MIN, IDENTITY_ATTESTATION_QUORUM},
     Address, AttestedIdentityRequest, BlockProofBundle, ChainProof, SignedTransaction, UptimeProof,
 };
-use crate::proof_backend::folding::{GlobalInstance, GlobalProofHandle};
+use crate::proof_backend::folding::{GlobalInstance, GlobalProof, GlobalProofHandle};
 use crate::proof_backend::ProofVersion;
 
 use rpp_pruning::{
@@ -1691,6 +1691,10 @@ pub struct Block {
     pub consensus: ConsensusCertificate,
     #[serde(default)]
     pub consensus_proof: Option<ChainProof>,
+    #[serde(default)]
+    pub global_instance: Option<GlobalInstance>,
+    #[serde(default)]
+    pub global_proof: Option<GlobalProof>,
     pub hash: String,
     #[serde(default)]
     pub pruned: bool,
@@ -1737,6 +1741,8 @@ impl Block {
             signature: signature_to_hex(&signature),
             consensus,
             consensus_proof,
+            global_instance: None,
+            global_proof: None,
             hash: hex::encode(hash),
             pruned: false,
         }
@@ -1893,6 +1899,95 @@ impl Block {
         match mode {
             VerifyMode::Full => self.verify_consensus_with_metrics(previous, &registry, metrics)?,
             VerifyMode::WithoutStark => self.verify_consensus_light_with_metrics(metrics)?,
+        }
+
+        self.verify_global_folding_state()?;
+
+        Ok(())
+    }
+
+    fn verify_global_folding_state(&self) -> ChainResult<()> {
+        let Some(instance) = &self.global_instance else {
+            return Ok(());
+        };
+
+        let Some(proof) = &self.global_proof else {
+            return Ok(());
+        };
+
+        let expected_commitment = hex::encode(instance.commitment.as_slice());
+
+        if let Some(header_state) = &self.header.global_instance_commitment {
+            if header_state != &expected_commitment {
+                return Err(ChainError::Crypto(
+                    "global instance commitment mismatch in header".into(),
+                ));
+            }
+        }
+
+        let expected_version = ProofVersion::for_height_and_epoch(Some(self.header.height), None);
+
+        if let Some(handle) = &self.header.global_proof_handle {
+            let header_commitment = hex::decode(&handle.proof_commitment).map_err(|err| {
+                ChainError::Crypto(format!(
+                    "invalid global proof commitment encoding '{}': {err}",
+                    handle.proof_commitment
+                ))
+            })?;
+
+            if header_commitment.as_slice() != proof.handle.proof_commitment {
+                return Err(ChainError::Crypto(
+                    "global proof commitment mismatch in header".into(),
+                ));
+            }
+
+            let header_vk = hex::decode(&handle.vk_id).map_err(|err| {
+                ChainError::Crypto(format!(
+                    "invalid global proof vk id '{}': {err}",
+                    handle.vk_id
+                ))
+            })?;
+            if header_vk.as_slice() != proof.handle.vk_id.as_slice() {
+                return Err(ChainError::Crypto(
+                    "global proof vk id mismatch in header".into(),
+                ));
+            }
+
+            if handle.version != proof_version_label(expected_version) {
+                return Err(ChainError::Crypto(
+                    "global proof version not permitted for height".into(),
+                ));
+            }
+        }
+
+        if expected_version == ProofVersion::NovaV2 && proof.handle.version != ProofVersion::NovaV2
+        {
+            return Err(ChainError::Crypto(
+                "nova-v2 folding proof required after cutover".into(),
+            ));
+        }
+
+        let (state_header, rpp_header) = instance.to_header_fields();
+        if state_header.is_empty() || rpp_header.is_empty() {
+            return Err(ChainError::Crypto(
+                "global instance is missing state or pruning commitments".into(),
+            ));
+        }
+
+        if proof.instance_commitment.as_slice() != instance.commitment.as_slice() {
+            return Err(ChainError::Crypto(
+                "global proof commitment does not match instance".into(),
+            ));
+        }
+
+        let backend = crate::proof_backend::folding::MockFoldingBackend {};
+        let verified = backend.verify(instance, proof).map_err(|err| {
+            ChainError::Crypto(format!("global proof verification failed: {err}"))
+        })?;
+        if !verified {
+            return Err(ChainError::Crypto(
+                "global proof rejected by folding backend".into(),
+            ));
         }
 
         Ok(())
@@ -2415,6 +2510,10 @@ pub(crate) struct BlockEnvelope {
     pub consensus: ConsensusCertificate,
     #[serde(default)]
     pub consensus_proof: Option<ChainProof>,
+    #[serde(default)]
+    pub global_instance: Option<GlobalInstance>,
+    #[serde(default)]
+    pub global_proof: Option<GlobalProof>,
     pub hash: String,
     #[serde(default)]
     pub pruned: bool,
@@ -2451,6 +2550,8 @@ impl BlockEnvelope {
             signature: block.signature.clone(),
             consensus: block.consensus.clone(),
             consensus_proof: block.consensus_proof.clone(),
+            global_instance: block.global_instance.clone(),
+            global_proof: block.global_proof.clone(),
             hash: block.hash.clone(),
             pruned: block.pruned,
         }
@@ -2509,6 +2610,8 @@ impl StoredBlock {
             signature: envelope.signature,
             consensus: envelope.consensus,
             consensus_proof: envelope.consensus_proof,
+            global_instance: envelope.global_instance,
+            global_proof: envelope.global_proof,
             hash: envelope.hash,
             pruned: envelope.pruned || was_pruned,
         }
