@@ -1,4 +1,6 @@
 use serde::{de::Error as DeError, Deserialize, Deserializer, Serialize, Serializer};
+use std::time::Instant;
+use tracing::{debug, info, warn};
 
 use crate::{BackendError, BackendResult, Blake2sHasher};
 
@@ -6,6 +8,7 @@ const INSTANCE_COMMITMENT_MAX_LEN: usize = 64;
 const GLOBAL_PROOF_BYTES_MAX_LEN: usize = 4096;
 const VERIFICATION_KEY_ID_MAX_LEN: usize = 64;
 const PROOF_COMMITMENT_LEN: usize = 32;
+const BLOCK_WITNESS_PAYLOAD_MAX_LEN: usize = 4096;
 
 /// Fixed-capacity byte container to keep proof artifacts bounded and allocation-free.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -195,6 +198,129 @@ pub trait FoldingBackend {
     fn verify(&self, instance: &GlobalInstance, proof: &GlobalProof) -> BackendResult<bool>;
 }
 
+/// Execute a single folding step with validation, tracing, and optional verification.
+///
+/// The helper enforces monotonic block indices, bounds the witness payload, and ensures
+/// the provided proof commits to the supplied global instance. When the instance lacks a
+/// combined commitment but exposes state and pruning commitments, the commitment is
+/// derived deterministically via [`derive_combined_commitment`]. Backend execution is
+/// timed and traced, and (under the `folding-verify` feature) a post-fold verification
+/// check is issued to guard correctness in debug flows.
+pub fn fold_pipeline_step(
+    mut instance_prev: GlobalInstance,
+    proof_prev: GlobalProof,
+    block_witness: BlockWitness,
+    backend: &impl FoldingBackend,
+) -> BackendResult<(GlobalInstance, GlobalProof)> {
+    let start = Instant::now();
+
+    if block_witness.block_number <= instance_prev.index {
+        return Err(BackendError::Failure(format!(
+            "block number {} must exceed current instance index {}",
+            block_witness.block_number, instance_prev.index
+        )));
+    }
+
+    if block_witness.payload.is_empty() {
+        return Err(BackendError::Failure(
+            "block witness payload cannot be empty".into(),
+        ));
+    }
+
+    if block_witness.payload.len() > BLOCK_WITNESS_PAYLOAD_MAX_LEN {
+        return Err(BackendError::Failure(format!(
+            "block witness payload exceeds limit ({} > {})",
+            block_witness.payload.len(),
+            BLOCK_WITNESS_PAYLOAD_MAX_LEN
+        )));
+    }
+
+    if instance_prev.commitment.is_empty()
+        && !instance_prev.state_commitment.is_empty()
+        && !instance_prev.rpp_commitment.is_empty()
+    {
+        debug!(
+            index = instance_prev.index,
+            "deriving missing instance commitment from state and pruning commitments"
+        );
+        instance_prev.commitment = derive_combined_commitment(
+            instance_prev.index,
+            &instance_prev.state_commitment,
+            &instance_prev.rpp_commitment,
+        );
+    }
+
+    if instance_prev.commitment.is_empty() {
+        return Err(BackendError::Failure(
+            "global instance is missing a commitment and combination inputs".into(),
+        ));
+    }
+
+    if proof_prev.instance_commitment.as_slice() != instance_prev.commitment.as_slice() {
+        return Err(BackendError::Failure(
+            "previous proof commitment does not match global instance".into(),
+        ));
+    }
+
+    let fold_start = Instant::now();
+    let fold_result = backend.fold(&instance_prev, &proof_prev, &block_witness);
+    let fold_elapsed = fold_start.elapsed();
+
+    match fold_result {
+        Ok((instance_next, proof_next)) => {
+            info!(
+                previous_index = instance_prev.index,
+                next_index = instance_next.index,
+                witness_block = block_witness.block_number,
+                fold_ms = fold_elapsed.as_millis(),
+                "folding step completed"
+            );
+
+            #[cfg(feature = "folding-verify")]
+            {
+                let verify_start = Instant::now();
+                let verified = backend.verify(&instance_next, &proof_next)?;
+                let verify_elapsed = verify_start.elapsed();
+
+                if !verified {
+                    warn!(
+                        next_index = instance_next.index,
+                        "post-fold verification failed"
+                    );
+                    return Err(BackendError::Failure(
+                        "post-fold verification failed".into(),
+                    ));
+                }
+
+                info!(
+                    next_index = instance_next.index,
+                    verify_ms = verify_elapsed.as_millis(),
+                    "post-fold verification succeeded"
+                );
+            }
+
+            let total_elapsed = start.elapsed();
+            debug!(
+                previous_index = instance_prev.index,
+                next_index = instance_next.index,
+                total_ms = total_elapsed.as_millis(),
+                "fold pipeline step finished"
+            );
+
+            Ok((instance_next, proof_next))
+        }
+        Err(err) => {
+            warn!(
+                previous_index = instance_prev.index,
+                witness_block = block_witness.block_number,
+                error = %err,
+                "folding step failed"
+            );
+            Err(err)
+        }
+    }
+}
+
 #[cfg(any(test, feature = "prover-mock"))]
 #[derive(Debug, Default, Clone, Copy)]
 pub struct MockFoldingBackend;
@@ -356,5 +482,74 @@ mod tests {
 
         assert_eq!(state_header, instance.state_commitment.as_slice());
         assert_eq!(rpp_header, instance.rpp_commitment.as_slice());
+    }
+
+    #[test]
+    fn fold_pipeline_validates_and_derives_commitments() {
+        let backend = MockFoldingBackend;
+        let index = 3u64;
+        let instance = GlobalInstance {
+            index,
+            commitment: Vec::new(),
+            state_commitment: b"state-fold".to_vec(),
+            rpp_commitment: b"rpp-fold".to_vec(),
+        };
+
+        let derived_commitment =
+            derive_combined_commitment(index, &instance.state_commitment, &instance.rpp_commitment);
+        let proof = GlobalProof::new(
+            &derived_commitment,
+            b"proof-fold",
+            MockFoldingBackend::VK_ID,
+            MockFoldingBackend::VERSION,
+        )
+        .expect("mock proof creation succeeds");
+        let witness = BlockWitness::new(index + 1, vec![1, 2, 3, 4]);
+
+        let (next_instance, next_proof) =
+            fold_pipeline_step(instance.clone(), proof, witness, &backend)
+                .expect("pipeline fold succeeds");
+
+        assert_eq!(next_instance.index, instance.index + 1);
+        assert_eq!(next_proof.instance_commitment.as_slice(), b"instance-4");
+        assert_eq!(next_instance.commitment, b"instance-4".to_vec());
+    }
+
+    #[test]
+    fn fold_pipeline_rejects_non_monotonic_indices() {
+        let backend = MockFoldingBackend;
+        let instance = GlobalInstance::new(5, b"instance-5".to_vec());
+        let proof = GlobalProof::new(
+            b"instance-5",
+            b"proof-5",
+            MockFoldingBackend::VK_ID,
+            MockFoldingBackend::VERSION,
+        )
+        .expect("mock proof creation succeeds");
+        let witness = BlockWitness::new(5, vec![1]);
+
+        let err = fold_pipeline_step(instance, proof, witness, &backend)
+            .expect_err("fold should fail for non-monotonic indices");
+
+        assert!(matches!(err, BackendError::Failure(message) if message.contains("exceed")));
+    }
+
+    #[test]
+    fn fold_pipeline_rejects_oversized_payloads() {
+        let backend = MockFoldingBackend;
+        let instance = GlobalInstance::new(8, b"instance-8".to_vec());
+        let proof = GlobalProof::new(
+            b"instance-8",
+            b"proof-8",
+            MockFoldingBackend::VK_ID,
+            MockFoldingBackend::VERSION,
+        )
+        .expect("mock proof creation succeeds");
+        let witness = BlockWitness::new(9, vec![0u8; BLOCK_WITNESS_PAYLOAD_MAX_LEN + 1]);
+
+        let err = fold_pipeline_step(instance, proof, witness, &backend)
+            .expect_err("fold should fail for oversized payloads");
+
+        assert!(matches!(err, BackendError::Failure(message) if message.contains("exceeds")));
     }
 }

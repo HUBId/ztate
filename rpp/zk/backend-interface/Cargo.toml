@@ -13,6 +13,7 @@ backend-plonky3-gpu = ["backend-plonky3"]
 prover-stwo = []
 prover-stwo-simd = ["prover-stwo"]
 prover-mock = []
+folding-verify = []
 
 [dependencies]
 bincode = "=1.3.3"
@@ -22,6 +23,7 @@ hex = "=0.4.3"
 serde = { version = "=1.0.225", features = ["derive"] }
 serde_json = { workspace = true }
 thiserror = "=2.0.12"
+tracing = { workspace = true }
 
 [dev-dependencies]
 serde = { version = "=1.0.225", features = ["derive"] }
