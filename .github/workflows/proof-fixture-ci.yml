@@ -28,7 +28,7 @@ jobs:
       - name: Run unit + property suites
         run: |
           set -euo pipefail
-          cargo xtask test-unit
+          cargo run --locked --package xtask -- test-unit
 
   api-contract:
     name: API contract guard
