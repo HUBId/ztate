@@ -11,3 +11,6 @@ mod valid_proof;
 
 #[cfg(feature = "prover-mock")]
 mod mock_state_view;
+
+#[cfg(feature = "prover-mock")]
+mod mock_fold_pipeline;

@@ -26,7 +26,7 @@ use rpp_pruning::{
     COMMITMENT_TAG, DIGEST_LENGTH, ENVELOPE_TAG, SNAPSHOT_STATE_TAG,
 };
 
-struct CountingStateView {
+pub(super) struct CountingStateView {
     path_depth: u32,
     pruning_proofs: Vec<Arc<Envelope>>,
     cache_misses: Mutex<HashMap<String, usize>>,
@@ -36,7 +36,7 @@ struct CountingStateView {
 }
 
 impl CountingStateView {
-    fn new(path_depth: u32, pruning_proofs: Vec<Arc<Envelope>>) -> Self {
+    pub(super) fn new(path_depth: u32, pruning_proofs: Vec<Arc<Envelope>>) -> Self {
         Self {
             path_depth,
             pruning_proofs,
@@ -47,11 +47,11 @@ impl CountingStateView {
         }
     }
 
-    fn cache_miss(&self, kind: &str) -> usize {
+    pub(super) fn cache_miss(&self, kind: &str) -> usize {
         *self.cache_misses.lock().unwrap().get(kind).unwrap_or(&0)
     }
 
-    fn build_transaction_witness(tx: &SignedTransaction) -> TransactionWitness {
+    pub(super) fn build_transaction_witness(tx: &SignedTransaction) -> TransactionWitness {
         let tx_id = tx.hash();
         let sender_before =
             AccountBalanceWitness::new(tx.payload.from.clone(), 1_000, tx.payload.nonce);
@@ -111,12 +111,16 @@ impl crate::rpp::StateView for CountingStateView {
     }
 
     fn log_cache_miss(&self, kind: &str) {
+        tracing::debug!(cache = kind, "cache miss recorded");
         let mut guard = self.cache_misses.lock().unwrap();
         *guard.entry(kind.to_string()).or_default() += 1;
     }
 }
 
-fn dummy_block(transactions: Vec<SignedTransaction>, pruning_proof: Arc<Envelope>) -> Block {
+pub(super) fn dummy_block(
+    transactions: Vec<SignedTransaction>,
+    pruning_proof: Arc<Envelope>,
+) -> Block {
     let header = crate::runtime::types::block::BlockHeader {
         height: 0,
         previous_hash: String::new(),
@@ -200,7 +204,7 @@ fn dummy_block(transactions: Vec<SignedTransaction>, pruning_proof: Arc<Envelope
     }
 }
 
-fn dummy_pruning_proof() -> Arc<Envelope> {
+pub(super) fn dummy_pruning_proof() -> Arc<Envelope> {
     let schema_version = SchemaVersion::new(0);
     let parameter_version = ParameterVersion::new(0);
     let state_commitment = TaggedDigest::new(SNAPSHOT_STATE_TAG, [1u8; DIGEST_LENGTH]);
@@ -228,7 +232,7 @@ fn dummy_pruning_proof() -> Arc<Envelope> {
     )
 }
 
-fn dummy_transaction(
+pub(super) fn dummy_transaction(
     from: &str,
     to: &str,
     amount: u128,
