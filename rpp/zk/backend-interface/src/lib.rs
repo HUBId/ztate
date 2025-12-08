@@ -22,6 +22,7 @@ pub mod audit;
 pub mod crash_reports;
 pub mod determinism;
 pub mod folding;
+pub mod proof_version;
 
 use std::fmt;
 
@@ -51,6 +52,7 @@ pub mod blake2s {
 }
 
 pub use blake2s::{Blake2sHash, Blake2sHasher};
+pub use proof_version::{ProofVersion, NOVA_V2_MANDATORY_EPOCH, NOVA_V2_MANDATORY_HEIGHT};
 
 use bincode::Options;
 use serde::de::DeserializeOwned;

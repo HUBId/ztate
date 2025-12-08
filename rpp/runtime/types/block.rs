@@ -37,7 +37,8 @@ use super::{
     identity::{IDENTITY_ATTESTATION_GOSSIP_MIN, IDENTITY_ATTESTATION_QUORUM},
     Address, AttestedIdentityRequest, BlockProofBundle, ChainProof, SignedTransaction, UptimeProof,
 };
-use crate::proof_backend::folding::{GlobalInstance, GlobalProofHandle, ProofVersion};
+use crate::proof_backend::folding::{GlobalInstance, GlobalProofHandle};
+use crate::proof_backend::ProofVersion;
 
 use rpp_pruning::{
     BlockHeight, Commitment, DomainTag, FirewoodEnvelope, ParameterVersion, ProofSegment,

@@ -2,7 +2,7 @@ use serde::{de::Error as DeError, Deserialize, Deserializer, Serialize, Serializ
 use std::time::Instant;
 use tracing::{debug, info, warn};
 
-use crate::{BackendError, BackendResult, Blake2sHasher};
+use crate::{BackendError, BackendResult, Blake2sHasher, ProofVersion};
 
 const INSTANCE_COMMITMENT_MAX_LEN: usize = 64;
 const GLOBAL_PROOF_BYTES_MAX_LEN: usize = 4096;
@@ -160,12 +160,6 @@ impl GlobalProofHandle {
             version,
         }
     }
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub enum ProofVersion {
-    AggregatedV1,
-    NovaV2,
 }
 
 /// Public witness material for the next fold step.

@@ -1080,7 +1080,7 @@ mod tests {
         pruning_from_previous, Block, BlockHeader, BlockMetadata, BlockProofBundle, ChainProof,
         PruningProof, RecursiveProof,
     };
-    use crate::zk::backend_interface::folding::ProofVersion;
+    use crate::zk::backend_interface::ProofVersion;
     use ed25519_dalek::Signature;
     use hex;
     use rpp_pruning::{
