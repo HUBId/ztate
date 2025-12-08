@@ -734,6 +734,60 @@ mod tests {
             .expect("mock verification succeeds"));
     }
 
+    #[test]
+    fn reconstruct_block_restores_expected_commitments() {
+        let tip_snapshot = CommitmentSnapshot::new(
+            12,
+            b"tip-state",
+            b"tip-rpp",
+            b"tip-pruned",
+            b"tip-history",
+        );
+
+        let aux = RestoreAuxData {
+            commitment_chain: vec![
+                CommitmentSnapshot::new(10, b"state-10", b"rpp-10", b"pruned-10", b"history-10"),
+                CommitmentSnapshot::new(11, b"state-11", b"rpp-11", b"pruned-11", b"history-11"),
+                tip_snapshot.clone(),
+            ],
+            parent_state_commitment: b"parent-state".to_vec(),
+            execution_rules: b"execution-rules".to_vec(),
+            proof_artifacts: vec![b"proof-a".to_vec(), b"proof-b".to_vec()],
+            chain_spec: b"chain-spec".to_vec(),
+            checkpoints: vec![b"checkpoint-1".to_vec(), b"checkpoint-2".to_vec()],
+        };
+
+        let reconstructed = reconstruct_block(9, &tip_snapshot, &aux)
+            .expect("reconstruction should succeed with consistent inputs");
+
+        let mut preimage = Vec::new();
+        preimage.extend_from_slice(&9u64.to_le_bytes());
+        preimage.extend_from_slice(&tip_snapshot.combined_commitment);
+        preimage.extend_from_slice(&aux.parent_state_commitment);
+        preimage.extend_from_slice(&aux.execution_rules);
+        preimage.extend_from_slice(&aux.chain_spec);
+
+        for snapshot in &aux.commitment_chain {
+            preimage.extend_from_slice(&snapshot.combined_commitment);
+        }
+
+        for artifact in &aux.proof_artifacts {
+            preimage.extend_from_slice(artifact);
+        }
+
+        for checkpoint in &aux.checkpoints {
+            preimage.extend_from_slice(checkpoint);
+        }
+
+        let expected_commitment = Blake2sHasher::hash(&preimage).0.to_vec();
+
+        assert_eq!(
+            reconstructed.reconstructed_state_commitment,
+            expected_commitment
+        );
+        assert_eq!(reconstructed.history_anchor, tip_snapshot.history_commitment);
+    }
+
     #[cfg(feature = "prover-mock")]
     #[test]
     fn mock_pipeline_entrypoint_is_deterministic() {

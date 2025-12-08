@@ -2817,11 +2817,85 @@ mod tests {
         (header, proof)
     }
 
+    fn header_at_height(height: u64) -> BlockHeader {
+        BlockHeader::new(
+            height,
+            ZERO_DIGEST_HEX.into(),
+            ZERO_DIGEST_HEX.into(),
+            ZERO_DIGEST_HEX.into(),
+            ZERO_DIGEST_HEX.into(),
+            ZERO_DIGEST_HEX.into(),
+            ZERO_DIGEST_HEX.into(),
+            ZERO_DIGEST_HEX.into(),
+            ZERO_DIGEST_HEX.into(),
+            "1000".into(),
+            ZERO_DIGEST_HEX.into(),
+            ZERO_DIGEST_HEX.into(),
+            ZERO_DIGEST_HEX.into(),
+            "proposer-address".into(),
+            "tier-0".into(),
+            0,
+        )
+    }
+
     #[test]
     fn verify_global_proof_only_needs_header_and_payload() {
         let (header, proof) = sample_header_and_global_proof();
 
         assert!(verify_global_proof(&header, &proof));
+    }
+
+    #[test]
+    fn global_proof_payload_stays_constant_for_large_heights() {
+        use std::time::{Duration, Instant};
+
+        let heights = [10_000u64, 50_000, 100_000];
+        let proof_bytes = vec![0xAB; 512];
+        let vk_id = vec![0xCD; 16];
+
+        let mut durations = Vec::new();
+
+        for height in heights {
+            let instance = GlobalInstance::from_state_and_rpp(
+                height,
+                format!("state-{height}"),
+                format!("rpp-{height}"),
+            );
+            let proof = GlobalProof::new(
+                instance.commitment.clone(),
+                &proof_bytes,
+                &vk_id,
+                ProofVersion::AggregatedV1,
+            )
+            .expect("mock proof creation succeeds");
+
+            let header = header_at_height(height)
+                .with_global_instance(&instance, Some(&proof.handle));
+
+            assert_eq!(proof.proof_bytes.as_slice().len(), proof_bytes.len());
+            assert_eq!(
+                proof.instance_commitment.as_slice(),
+                instance.commitment.as_slice()
+            );
+
+            let verify_start = Instant::now();
+            assert!(verify_global_proof(&header, &proof));
+            durations.push(verify_start.elapsed());
+        }
+
+        let min_duration = *durations
+            .iter()
+            .min()
+            .expect("at least one verification duration is recorded");
+        let max_duration = *durations
+            .iter()
+            .max()
+            .expect("at least one verification duration is recorded");
+
+        assert!(
+            max_duration <= min_duration + Duration::from_millis(5),
+            "verification should stay stable across large heights: min={min_duration:?} max={max_duration:?}"
+        );
     }
 
     #[test]
@@ -2840,6 +2914,61 @@ mod tests {
         header.height = 2_000_000;
 
         assert!(!verify_global_proof(&header, &proof));
+    }
+
+    #[test]
+    fn nova_cutover_requires_bootstrap_version_shift() {
+        struct CutoverGuard(u64, u64);
+        impl Drop for CutoverGuard {
+            fn drop(&mut self) {
+                ProofVersion::configure_cutover(self.0, self.1);
+            }
+        }
+
+        let original_cutover = ProofVersion::current_cutover();
+        let _guard = CutoverGuard(original_cutover.0, original_cutover.1);
+
+        let nova_cutover_height = 5u64;
+        ProofVersion::configure_cutover(nova_cutover_height, 0);
+
+        let aggregated_instance = GlobalInstance::from_state_and_rpp(
+            nova_cutover_height - 1,
+            b"bootstrap-state",
+            b"bootstrap-rpp",
+        );
+        let aggregated_proof = GlobalProof::new(
+            aggregated_instance.commitment.clone(),
+            b"aggregated-proof",
+            b"vk-aggregated",
+            ProofVersion::AggregatedV1,
+        )
+        .expect("aggregated proof creation succeeds");
+        let aggregated_header = header_at_height(nova_cutover_height - 1)
+            .with_global_instance(&aggregated_instance, Some(&aggregated_proof.handle));
+
+        assert!(verify_global_proof(&aggregated_header, &aggregated_proof));
+
+        let nova_instance = GlobalInstance::from_state_and_rpp(
+            nova_cutover_height,
+            b"nova-state",
+            b"nova-rpp",
+        );
+        let nova_proof = GlobalProof::new(
+            nova_instance.commitment.clone(),
+            b"nova-proof",
+            b"vk-nova",
+            ProofVersion::NovaV2,
+        )
+        .expect("nova proof creation succeeds");
+        let nova_header = header_at_height(nova_cutover_height)
+            .with_global_instance(&nova_instance, Some(&nova_proof.handle));
+
+        assert!(verify_global_proof(&nova_header, &nova_proof));
+
+        ProofVersion::configure_cutover(original_cutover.0, original_cutover.1);
+
+        assert!(verify_global_proof(&aggregated_header, &aggregated_proof));
+        assert!(!verify_global_proof(&nova_header, &nova_proof));
     }
 
     fn seeded_keypair(seed: u8) -> Keypair {
