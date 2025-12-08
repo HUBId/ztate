@@ -440,6 +440,55 @@ mod tests {
             .expect("mock verification succeeds"));
     }
 
+    #[cfg(feature = "prover-mock")]
+    #[test]
+    fn mock_pipeline_entrypoint_is_deterministic() {
+        let backend = MockFoldingBackend;
+
+        let starting_index = 11u64;
+        let previous_commitment = format!("instance-{}", starting_index);
+        let previous_proof_bytes = format!("proof-{}", starting_index);
+
+        let instance_prev = GlobalInstance::new(starting_index, previous_commitment.as_bytes());
+        let proof_prev = GlobalProof::new(
+            previous_commitment.as_bytes(),
+            previous_proof_bytes.as_bytes(),
+            MockFoldingBackend::VK_ID,
+            MockFoldingBackend::VERSION,
+        )
+        .expect("mock proof creation succeeds");
+
+        let witness_block = starting_index + 1;
+        let block_witness = BlockWitness::new(witness_block, b"fold-payload".to_vec());
+
+        let (instance_next, proof_next) =
+            fold_pipeline_step(instance_prev, proof_prev, block_witness, &backend)
+                .expect("pipeline fold succeeds");
+
+        let expected_index = starting_index + 1;
+        let expected_commitment = format!("instance-{}", expected_index);
+        let expected_proof_bytes = format!("proof-{}", witness_block);
+
+        assert_eq!(instance_next.index, expected_index);
+        assert_eq!(
+            instance_next.commitment,
+            expected_commitment.as_bytes().to_vec()
+        );
+        assert_eq!(
+            proof_next.instance_commitment.as_slice(),
+            expected_commitment.as_bytes()
+        );
+        assert_eq!(
+            proof_next.proof_bytes.as_slice(),
+            expected_proof_bytes.as_bytes()
+        );
+        assert_eq!(
+            proof_next.handle.vk_id.as_slice(),
+            MockFoldingBackend::VK_ID.as_bytes()
+        );
+        assert_eq!(proof_next.handle.version, MockFoldingBackend::VERSION);
+    }
+
     #[test]
     fn constructs_instance_from_state_and_rpp() {
         let index = 10u64;
