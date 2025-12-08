@@ -15,6 +15,22 @@ Ein komplettes Beispiel liegt unter
 `docs/interfaces/runtime/examples/light_client_global_proof.json` und zeigt die
 JSON-Repräsentation eines Headers plus dazugehörigem Proof-Blob.
 
+## Proof-Bezug über Handles
+
+Der `global_proof_handle` dient als content-addressable Zeiger auf den
+tatsächlichen Proof-Blob:
+
+* **Addressierung via Commitment:** `proof_commitment` ist der 32-Byte-Blake2s
+  über die Proof-Bytes. Downloader können den Blob unter
+  `cas://global-proof/<proof_commitment>` oder einem äquivalenten HTTP/P2P-Key
+  ablegen und identifizieren, ohne zusätzliche Metadaten zu benötigen.
+* **Gossip-Propagation:** Block-Gossip (`gossip_block.jsonschema`) transportiert
+  den Handle vollständig, sodass Light Clients ihn frühzeitig empfangen und
+  den Proof parallel zum Header-Download anfordern können.
+* **Deduplication & Caching:** Da der Key nur aus dem Commitment besteht, können
+  mehrere Peers denselben Blob bereitstellen. Clients cachen Proofs
+  commitment-basiert, um Wiederholungsdownloads zu vermeiden.
+
 ## Validierung ohne History
 
 Light Clients benötigen weder Ledger-History noch State-Snapshots, um einen Tip
@@ -25,23 +41,41 @@ auf Basis der übertragenen Artefakte:
 1. Header aus Gossip/RPC laden und `global_proof_handle`/`global_instance_commitment`
 dekodieren.
 2. Proof-Payload (`GlobalProof`) via Handle/Commitment vom Netz beziehen.
-3. `verify_global_proof(&header, &global_proof)` aufrufen. Der Helfer verifiziert
-   Commitment- und VK-Konsistenz, prüft das erwartete Proof-Version-Label basierend
-   auf der Header-Höhe gegen die Registry-Abbildung und hasht die Proof-Bytes
-   erneut gegen das Commitment.
+3. `fetch_and_verify_global_proof(&header, fetch_by_handle)` oder
+   `verify_global_proof(&header, &global_proof)` aufrufen. Der neue Helper zieht
+   den Proof aus einem content-addressable Speicher, liefert bei fehlendem Blob
+   eine aussagekräftige `InvalidProof`-Fehlermeldung und verifiziert anschließend
+   Commitment, VK-ID und Version gegen Header und Registry.
 
 ```rust
 use rpp_chain::runtime::types::{BlockHeader, verify_global_proof};
 use rpp_chain::proof_backend::folding::GlobalProof;
 
-fn validate_tip(header: &BlockHeader, proof: &GlobalProof) -> bool {
-    verify_global_proof(header, proof)
+fn validate_tip(header: &BlockHeader, cas: &ProofStore) -> ChainResult<bool> {
+    let proof = fetch_and_verify_global_proof(header, |handle| cas.get(handle));
+    Ok(proof.map(|_| true)?)
 }
 ```
 
 Bei Erfolg liefert der Helper `true`; alle Fehlerpfade (fehlendes Commitment,
-Versionsmismatch, invalide Hex) ergeben `false` und benötigen keine zusätzlichen
+Versionsmismatch, invalide Hex oder nicht auffindbarer Proof) ergeben einen
+`ChainError` mit klarer Ursache und benötigen keine zusätzlichen
 Datenquellen.
+
+## Anforderungen an Header- und Netzwerk-Propagation
+
+* **Header-Mindestfelder:** `global_instance_commitment` und
+  `global_proof_handle` müssen als lowercase Hex im Gossip-/RPC-Header stehen,
+  damit Light Clients den CAS-Key und den erwarteten VK sofort kennen.
+* **Handle-Stabilität im Gossip:** P2P-Gossip darf den Handle nicht kürzen oder
+  neu serialisieren; `proof_commitment`, `vk_id` und `version` müssen exakt wie
+  im Block erzeugt propagiert werden. Nodes sollen den Handle bereits in der
+  Header-Preview mitsenden, sodass Downloader den Proof anfordern können, bevor
+  der gesamte Block/Body übertragen ist.
+* **Proof-Transport:** Proof-Blobs werden über `proof_commitment` adressiert
+  (HTTP Range Request, Bitswap/Libp2p, o. ä.). Clients sollten Streaming-Hashing
+  verwenden, um den Commitment während des Downloads zu verifizieren und große
+  Blobs früh verwerfen zu können, falls der Hash nicht passt.
 
 ## Optionale Sampling-/Fetch-Strategien
 

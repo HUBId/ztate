@@ -439,10 +439,14 @@ fn parse_proof_version_label(label: &str) -> Option<ProofVersion> {
 ///   [`ProofVersion::for_height_and_epoch`]) matches both the header label and
 ///   the proof handle.
 pub fn verify_global_proof(header: &BlockHeader, global_proof: &GlobalProof) -> bool {
-    verify_header_proof_pair(header, global_proof).is_ok()
+    verify_global_proof_with_errors(header, global_proof).is_ok()
 }
 
-fn verify_header_proof_pair(header: &BlockHeader, global_proof: &GlobalProof) -> ChainResult<()> {
+/// Validate a [`GlobalProof`] and bubble up precise error messages.
+pub fn verify_global_proof_with_errors(
+    header: &BlockHeader,
+    global_proof: &GlobalProof,
+) -> ChainResult<()> {
     let instance_commitment_hex = header.global_instance_commitment.as_ref().ok_or_else(|| {
         ChainError::Crypto("global instance commitment missing from header".into())
     })?;
@@ -521,6 +525,35 @@ fn verify_header_proof_pair(header: &BlockHeader, global_proof: &GlobalProof) ->
     }
 
     Ok(())
+}
+
+/// Resolve a [`GlobalProof`] by handle and validate it against the header.
+///
+/// The caller supplies a fetcher that returns the proof payload for the
+/// commitment contained in [`BlockHeader::global_proof_handle`]. Missing proofs
+/// or transport failures are surfaced as `ChainError::InvalidProof`, keeping the
+/// error separate from cryptographic validation failures.
+pub fn fetch_and_verify_global_proof<F>(
+    header: &BlockHeader,
+    fetch_by_handle: F,
+) -> ChainResult<GlobalProof>
+where
+    F: Fn(&GlobalProofHandleSummary) -> ChainResult<Option<GlobalProof>>,
+{
+    let handle_summary = header.global_proof_handle.as_ref().ok_or_else(|| {
+        ChainError::InvalidProof("global proof handle missing from header".into())
+    })?;
+
+    let global_proof = fetch_by_handle(handle_summary)?.ok_or_else(|| {
+        ChainError::InvalidProof(format!(
+            "global proof not available for commitment {} (vk_id {})",
+            handle_summary.proof_commitment, handle_summary.vk_id
+        ))
+    })?;
+
+    verify_global_proof_with_errors(header, &global_proof)?;
+
+    Ok(global_proof)
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -2846,6 +2879,36 @@ mod tests {
     }
 
     #[test]
+    fn fetch_and_verify_global_proof_resolves_payload_via_handle() {
+        let (header, proof) = sample_header_and_global_proof();
+
+        let fetched = fetch_and_verify_global_proof(&header, |handle| {
+            assert_eq!(
+                handle.proof_commitment,
+                hex::encode(proof.handle.proof_commitment)
+            );
+            assert_eq!(handle.vk_id, hex::encode(proof.handle.vk_id.as_slice()));
+            Ok(Some(proof.clone()))
+        })
+        .expect("proof is fetched and validated");
+
+        assert_eq!(fetched, proof);
+    }
+
+    #[test]
+    fn fetch_and_verify_global_proof_returns_clear_error_for_missing_payload() {
+        let (header, _proof) = sample_header_and_global_proof();
+
+        let err = fetch_and_verify_global_proof(&header, |_handle| Ok(None))
+            .expect_err("missing proof should fail");
+
+        assert!(matches!(err, ChainError::InvalidProof(_)));
+        assert!(err
+            .to_string()
+            .contains("global proof not available for commitment"));
+    }
+
+    #[test]
     fn global_proof_payload_stays_constant_for_large_heights() {
         use std::time::{Duration, Instant};
 
@@ -2869,8 +2932,8 @@ mod tests {
             )
             .expect("mock proof creation succeeds");
 
-            let header = header_at_height(height)
-                .with_global_instance(&instance, Some(&proof.handle));
+            let header =
+                header_at_height(height).with_global_instance(&instance, Some(&proof.handle));
 
             assert_eq!(proof.proof_bytes.as_slice().len(), proof_bytes.len());
             assert_eq!(
@@ -2948,11 +3011,8 @@ mod tests {
 
         assert!(verify_global_proof(&aggregated_header, &aggregated_proof));
 
-        let nova_instance = GlobalInstance::from_state_and_rpp(
-            nova_cutover_height,
-            b"nova-state",
-            b"nova-rpp",
-        );
+        let nova_instance =
+            GlobalInstance::from_state_and_rpp(nova_cutover_height, b"nova-state", b"nova-rpp");
         let nova_proof = GlobalProof::new(
             nova_instance.commitment.clone(),
             b"nova-proof",
