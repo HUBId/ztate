@@ -18,7 +18,7 @@ pub use block::{
 };
 pub(crate) use block::{serde_pruning_proof, CanonicalPruningEnvelope};
 pub use block::{
-    Block, BlockHeader, BlockMetadata, ProofSystem, PruningCommitmentMetadata,
+    verify_global_proof, Block, BlockHeader, BlockMetadata, ProofSystem, PruningCommitmentMetadata,
     PruningEnvelopeMetadata, PruningProofExt, PruningSegmentMetadata, PruningSnapshotMetadata,
     RecursiveProof, ReputationUpdate, TimetokeUpdate, ValidatedPruningEnvelope,
 };

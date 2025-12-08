@@ -109,14 +109,31 @@
         "proposer": {"type": "string"},
         "leader_tier": {"type": "string"},
         "leader_timetoke": {"type": "integer", "minimum": 0},
-        "global_instance_commitment": {"type": "string"},
+        "global_instance_commitment": {
+          "type": "string",
+          "description": "Hex-encoded Blake2s commitment (32 bytes) to the folding instance preimage (index + state + pruning roots).",
+          "pattern": "^[0-9a-f]{64}$"
+        },
         "global_proof_handle": {
           "type": "object",
+          "description": "Compact folding proof handle fetched by light clients before downloading the full proof payload.",
           "required": ["proof_commitment", "vk_id", "version"],
           "properties": {
-            "proof_commitment": {"type": "string"},
-            "vk_id": {"type": "string"},
-            "version": {"type": "string"}
+            "proof_commitment": {
+              "type": "string",
+              "description": "Lowercase hex commitment (Blake2s) of the serialized global proof bytes.",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "vk_id": {
+              "type": "string",
+              "description": "Hex-encoded verification-key identifier understood by the folding backend.",
+              "pattern": "^[0-9a-f]+$"
+            },
+            "version": {
+              "type": "string",
+              "enum": ["aggregated-v1", "nova-v2"],
+              "description": "Semantic version label that guards cutovers; maps to [`ProofVersion`]."
+            }
           },
           "additionalProperties": false
         }

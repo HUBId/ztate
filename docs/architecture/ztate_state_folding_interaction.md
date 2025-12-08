@@ -36,6 +36,10 @@ graph TD
   - `verify_global_proof` liefert `false` oder ein Backend-Error → Block-Validation schlägt fehl und der Proof wird mit einem strukturierten Fehler (inkl. Backend-Message) geloggt.
   - Header-Commitments (`C_state_h`, `C_rpp_h`, `global_instance_commitment`) stimmen nicht mit `I_next`/`π_next` überein → Block wird rejected, Log-Level `warn`, mit Kontext `height`, `instance.index` und dem abweichenden Feldnamen.
 
+### Light-Client-Pfad
+- **Header-only Check:** `verify_global_proof(header, global_proof)` prüft Commitment, Handle (Commitment + VK-ID) und Versionslabel allein anhand von Header und Proof-Payload. Es werden keine Ledger-Daten oder vorherige Blöcke benötigt.
+- **Serialisierung:** `global_instance_commitment` und `global_proof_handle` werden als lowercase Hex-Strings transportiert; der Handle enthält Commitment, `vk_id` und das semantische Label (`aggregated-v1` oder `nova-v2`). Ein End-to-End-Beispiel befindet sich unter `docs/interfaces/runtime/examples/light_client_global_proof.json`.
+
 ## Übergangsphase: alte Aggregations-Beweise vs. GlobalProofs
 - **Akzeptanzmatrix:** Während der Migration akzeptiert der Validator sowohl legacy Aggregations-Proofs (Poseidon-basierte `recursive_commitment`) als auch neue `GlobalProofHandle`/`GlobalProof`-Paare. Ein Feature-Flag (z. B. `folding-verify`) steuert, ob `verify_global_proof` verpflichtend ist oder optional.
 - **Priorisierung:** Falls beide Artefakte vorliegen, wird zuerst der GlobalProof validiert; schlägt dieser fehl, fällt der Pfad deterministisch auf die bisherige Aggregations-Validierung zurück, um Reorg-Risiken zu minimieren. Erfolgreiche GlobalProof-Validierung überschreibt das `proof_root`/`global_instance_commitment` im Header.
