@@ -8,3 +8,6 @@ mod official_integration;
 
 #[cfg(feature = "prover-stwo")]
 mod valid_proof;
+
+#[cfg(feature = "prover-mock")]
+mod mock_state_view;
