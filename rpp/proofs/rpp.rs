@@ -10,9 +10,12 @@ use crate::errors::{ChainError, ChainResult};
 use crate::proof_backend::{
     ProofSystemKind as BackendProofSystemKind, WitnessBytes, WitnessHeader,
 };
+use crate::runtime::types::block::Block;
 use crate::state::{merkle::compute_merkle_root, StoredUtxo};
 use crate::types::Address;
 use crate::types::PruningProof;
+use crate::types::SignedTransaction;
+use rayon::prelude::*;
 
 /// 32-byte digest representing a commitment root.
 pub type CommitmentDigest = [u8; 32];
@@ -661,6 +664,80 @@ impl BlockWitnessBuilder {
         witness.validate(witness.transactions.len(), expected_depth)?;
         Ok(witness)
     }
+}
+
+/// Abstraction over the state view required to assemble a block witness.
+///
+/// Implementations are responsible for sourcing transaction witnesses and
+/// Merkle paths, ideally reusing cached values where possible.
+pub trait StateView: Send + Sync {
+    /// Return the expected Merkle path depth for transaction inclusion proofs.
+    fn merkle_path_depth(&self) -> ChainResult<u32>;
+
+    /// Attempt to fetch a cached Merkle path for the provided transaction.
+    fn cached_transaction_path(&self, tx: &SignedTransaction) -> Option<MerklePathWitness>;
+
+    /// Load (and cache) the Merkle path for the provided transaction.
+    fn load_transaction_path(&self, tx: &SignedTransaction) -> ChainResult<MerklePathWitness>;
+
+    /// Attempt to fetch cached pruning proofs for the block.
+    fn cached_pruning_proofs(&self) -> Option<Vec<PruningProof>>;
+
+    /// Load pruning proofs for the block when the cache misses.
+    fn load_pruning_proofs(&self) -> ChainResult<Vec<PruningProof>>;
+
+    /// Build a transaction witness for the supplied signed transaction.
+    fn transaction_witness(&self, tx: &SignedTransaction) -> ChainResult<TransactionWitness>;
+
+    /// Log cache misses for diagnostics.
+    fn log_cache_miss(&self, kind: &str);
+}
+
+/// Assemble a [`BlockWitness`] for the provided block using the supplied
+/// [`StateView`]. Transaction witness derivation is parallelised to minimise
+/// latency while reusing cached Merkle paths and pruning proofs when available.
+pub fn produce_block_witness(
+    block: Block,
+    state_view: &dyn StateView,
+) -> ChainResult<BlockWitness> {
+    let expected_depth = state_view.merkle_path_depth()?;
+
+    let pruning_proofs = match state_view.cached_pruning_proofs() {
+        Some(proofs) => proofs,
+        None => {
+            state_view.log_cache_miss("pruning_proofs");
+            state_view.load_pruning_proofs()?
+        }
+    };
+
+    let transaction_results: ChainResult<Vec<(TransactionWitness, MerklePathWitness)>> = block
+        .transactions
+        .par_iter()
+        .map(|tx| {
+            let witness = state_view.transaction_witness(tx)?;
+            let path = match state_view.cached_transaction_path(tx) {
+                Some(path) => path,
+                None => {
+                    state_view.log_cache_miss("transaction_merkle_path");
+                    state_view.load_transaction_path(tx)?
+                }
+            };
+            Ok((witness, path))
+        })
+        .collect();
+
+    let (transactions, transaction_paths): (Vec<_>, Vec<_>) =
+        transaction_results?.into_iter().unzip();
+
+    let witness = BlockWitnessBuilder::new()
+        .with_expected_path_depth(expected_depth)
+        .with_transactions(transactions)
+        .with_transaction_paths(transaction_paths)
+        .with_pruning_proofs(pruning_proofs)
+        .build()?;
+
+    witness.validate(block.transactions.len(), expected_depth)?;
+    Ok(witness)
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
