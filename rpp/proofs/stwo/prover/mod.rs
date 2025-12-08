@@ -7,7 +7,10 @@ use crate::consensus::ConsensusCertificate;
 use crate::errors::{ChainError, ChainResult};
 use crate::proof_system::ProofProver;
 use crate::reputation::{ReputationWeights, Tier};
-use crate::rpp::{GlobalStateCommitments, ProofSystemKind};
+use crate::rpp::{
+    produce_block_witness, BlockWitness, GlobalStateCommitments, ProofSystemKind, StateView,
+};
+use crate::runtime::types::block::Block;
 use crate::state::merkle::compute_merkle_root;
 use crate::storage::Storage;
 use crate::types::{
@@ -334,6 +337,14 @@ impl<'a> WalletProver<'a> {
             &state_roots,
             block_height,
         )
+    }
+
+    pub fn produce_block_witness(
+        &self,
+        block: Block,
+        state_view: &dyn StateView,
+    ) -> ChainResult<BlockWitness> {
+        produce_block_witness(block, state_view)
     }
 
     pub fn derive_uptime_witness(&self, claim: &UptimeClaim) -> ChainResult<UptimeWitness> {

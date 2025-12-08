@@ -8803,6 +8803,7 @@ dependencies = [
  "prover-backend-interface",
  "prover_stwo_backend",
  "rand 0.8.5",
+ "rayon",
  "rcgen 0.12.1",
  "reqwest 0.12.24",
  "rpp-consensus",

@@ -113,6 +113,7 @@ num-traits = "=0.2.19"
 once_cell = "=1.21.3"
 parking_lot = "=0.12.5"
 prover-backend-interface = { path = "../zk/backend-interface" }
+rayon = "=1.11.0"
 prover_stwo_backend = { workspace = true, optional = true }
 reqwest = { version = "=0.12.24", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 rpp-consensus = { path = "../consensus", default-features = false }
