@@ -69,6 +69,8 @@ pub struct GlobalInstance {
     pub commitment: Vec<u8>,
     pub state_commitment: Vec<u8>,
     pub rpp_commitment: Vec<u8>,
+    pub pruned_commitment: Vec<u8>,
+    pub history_commitment: Vec<u8>,
 }
 
 impl GlobalInstance {
@@ -78,6 +80,8 @@ impl GlobalInstance {
             commitment: commitment.into(),
             state_commitment: Vec::new(),
             rpp_commitment: Vec::new(),
+            pruned_commitment: Vec::new(),
+            history_commitment: Vec::new(),
         }
     }
 
@@ -86,28 +90,155 @@ impl GlobalInstance {
     /// The combined commitment is derived by hashing the index, state commitment,
     /// and pruning commitment in a fixed order. No external state is read or
     /// mutated, making the helper safe for both prover and validator flows.
-    pub fn from_state_and_rpp(
+    pub fn from_commitments(
         index: u64,
         state_commitment: impl Into<Vec<u8>>,
         rpp_commitment: impl Into<Vec<u8>>,
+        pruned_commitment: impl Into<Vec<u8>>,
+        history_commitment: impl Into<Vec<u8>>,
     ) -> Self {
         let state_commitment = state_commitment.into();
         let rpp_commitment = rpp_commitment.into();
+        let pruned_commitment = pruned_commitment.into();
+        let history_commitment = history_commitment.into();
 
-        let commitment = derive_combined_commitment(index, &state_commitment, &rpp_commitment);
+        let commitment = derive_combined_commitment(
+            index,
+            &state_commitment,
+            &rpp_commitment,
+            &pruned_commitment,
+            &history_commitment,
+        );
 
         Self {
             index,
             commitment,
             state_commitment,
             rpp_commitment,
+            pruned_commitment,
+            history_commitment,
         }
+    }
+
+    pub fn from_state_and_rpp(
+        index: u64,
+        state_commitment: impl Into<Vec<u8>>,
+        rpp_commitment: impl Into<Vec<u8>>,
+    ) -> Self {
+        let rpp_commitment = rpp_commitment.into();
+        let history_commitment = rpp_commitment.clone();
+
+        Self::from_commitments(
+            index,
+            state_commitment,
+            rpp_commitment.clone(),
+            rpp_commitment,
+            history_commitment,
+        )
     }
 
     /// Return the header fields carried by the instance for downstream
     /// integrations.
-    pub fn to_header_fields(&self) -> (&[u8], &[u8]) {
-        (&self.state_commitment, &self.rpp_commitment)
+    pub fn to_header_fields(&self) -> CommitmentView<'_> {
+        CommitmentView {
+            state_commitment: &self.state_commitment,
+            rpp_commitment: &self.rpp_commitment,
+            pruned_commitment: &self.pruned_commitment,
+            history_commitment: &self.history_commitment,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CommitmentView<'a> {
+    pub state_commitment: &'a [u8],
+    pub rpp_commitment: &'a [u8],
+    pub pruned_commitment: &'a [u8],
+    pub history_commitment: &'a [u8],
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CommitmentSnapshot {
+    pub index: u64,
+    pub state_commitment: Vec<u8>,
+    pub rpp_commitment: Vec<u8>,
+    pub pruned_commitment: Vec<u8>,
+    pub history_commitment: Vec<u8>,
+    pub combined_commitment: Vec<u8>,
+}
+
+impl CommitmentSnapshot {
+    pub fn new(
+        index: u64,
+        state_commitment: impl Into<Vec<u8>>,
+        rpp_commitment: impl Into<Vec<u8>>,
+        pruned_commitment: impl Into<Vec<u8>>,
+        history_commitment: impl Into<Vec<u8>>,
+    ) -> Self {
+        let state_commitment = state_commitment.into();
+        let rpp_commitment = rpp_commitment.into();
+        let pruned_commitment = pruned_commitment.into();
+        let history_commitment = history_commitment.into();
+
+        let combined_commitment = derive_combined_commitment(
+            index,
+            &state_commitment,
+            &rpp_commitment,
+            &pruned_commitment,
+            &history_commitment,
+        );
+
+        Self {
+            index,
+            state_commitment,
+            rpp_commitment,
+            pruned_commitment,
+            history_commitment,
+            combined_commitment,
+        }
+    }
+
+    pub fn ensure_consistent(&self) -> BackendResult<()> {
+        let expected_commitment = derive_combined_commitment(
+            self.index,
+            &self.state_commitment,
+            &self.rpp_commitment,
+            &self.pruned_commitment,
+            &self.history_commitment,
+        );
+
+        if expected_commitment == self.combined_commitment {
+            Ok(())
+        } else {
+            Err(BackendError::Failure(
+                "combined commitment does not match constituent commitments".into(),
+            ))
+        }
+    }
+}
+
+impl From<&GlobalInstance> for CommitmentSnapshot {
+    fn from(instance: &GlobalInstance) -> Self {
+        let combined_commitment = if instance.commitment.is_empty() {
+            derive_combined_commitment(
+                instance.index,
+                &instance.state_commitment,
+                &instance.rpp_commitment,
+                &instance.pruned_commitment,
+                &instance.history_commitment,
+            )
+        } else {
+            instance.commitment.clone()
+        };
+
+        Self {
+            index: instance.index,
+            state_commitment: instance.state_commitment.clone(),
+            rpp_commitment: instance.rpp_commitment.clone(),
+            pruned_commitment: instance.pruned_commitment.clone(),
+            history_commitment: instance.history_commitment.clone(),
+            combined_commitment,
+        }
     }
 }
 
@@ -192,6 +323,61 @@ pub trait FoldingBackend {
     fn verify(&self, instance: &GlobalInstance, proof: &GlobalProof) -> BackendResult<bool>;
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PruningAirPublicInputs {
+    pub previous: CommitmentSnapshot,
+    pub next: CommitmentSnapshot,
+    pub start_state_commitment: Vec<u8>,
+    pub end_state_commitment: Vec<u8>,
+    pub inclusion_proofs_ok: bool,
+    pub completeness_checks_ok: bool,
+}
+
+impl PruningAirPublicInputs {
+    pub fn enforce(&self) -> BackendResult<()> {
+        self.previous.ensure_consistent()?;
+        self.next.ensure_consistent()?;
+
+        if self.previous.index + 1 != self.next.index {
+            return Err(BackendError::Failure(
+                "pruning fold must advance instance index by exactly one".into(),
+            ));
+        }
+
+        if self.previous.history_commitment != self.next.pruned_commitment {
+            return Err(BackendError::Failure(
+                "history commitment link between intervals is invalid".into(),
+            ));
+        }
+
+        if self.start_state_commitment != self.previous.state_commitment {
+            return Err(BackendError::Failure(
+                "start state of next interval does not match previous end state".into(),
+            ));
+        }
+
+        if self.end_state_commitment != self.next.state_commitment {
+            return Err(BackendError::Failure(
+                "computed end state does not match committed next state".into(),
+            ));
+        }
+
+        if !self.inclusion_proofs_ok {
+            return Err(BackendError::Failure(
+                "inclusion proofs for pruning-critical events failed".into(),
+            ));
+        }
+
+        if !self.completeness_checks_ok {
+            return Err(BackendError::Failure(
+                "completeness checks for pruning transcript failed".into(),
+            ));
+        }
+
+        Ok(())
+    }
+}
+
 /// Execute a single folding step with validation, tracing, and optional verification.
 ///
 /// The helper enforces monotonic block indices, bounds the witness payload, and ensures
@@ -241,6 +427,8 @@ pub fn fold_pipeline_step(
             instance_prev.index,
             &instance_prev.state_commitment,
             &instance_prev.rpp_commitment,
+            &instance_prev.pruned_commitment,
+            &instance_prev.history_commitment,
         );
     }
 
@@ -315,6 +503,82 @@ pub fn fold_pipeline_step(
     }
 }
 
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RestoreAuxData {
+    pub commitment_chain: Vec<CommitmentSnapshot>,
+    pub parent_state_commitment: Vec<u8>,
+    pub execution_rules: Vec<u8>,
+    pub proof_artifacts: Vec<Vec<u8>>,
+    pub chain_spec: Vec<u8>,
+    pub checkpoints: Vec<Vec<u8>>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReconstructionResult {
+    pub reconstructed_state_commitment: Vec<u8>,
+    pub history_anchor: Vec<u8>,
+}
+
+pub fn reconstruct_block(
+    height: u64,
+    tip: &CommitmentSnapshot,
+    aux: &RestoreAuxData,
+) -> BackendResult<ReconstructionResult> {
+    if aux.commitment_chain.is_empty() {
+        return Err(BackendError::Failure(
+            "commitment chain for reconstruction cannot be empty".into(),
+        ));
+    }
+
+    for snapshot in &aux.commitment_chain {
+        snapshot.ensure_consistent()?;
+    }
+
+    if aux
+        .commitment_chain
+        .iter()
+        .all(|snapshot| snapshot.index != tip.index)
+    {
+        return Err(BackendError::Failure(
+            "tip commitment is missing from reconstruction chain".into(),
+        ));
+    }
+
+    let mut preimage = Vec::new();
+    preimage.extend_from_slice(&height.to_le_bytes());
+    preimage.extend_from_slice(&tip.combined_commitment);
+    preimage.extend_from_slice(&aux.parent_state_commitment);
+    preimage.extend_from_slice(&aux.execution_rules);
+    preimage.extend_from_slice(&aux.chain_spec);
+
+    for snapshot in &aux.commitment_chain {
+        preimage.extend_from_slice(&snapshot.combined_commitment);
+    }
+
+    for artifact in &aux.proof_artifacts {
+        preimage.extend_from_slice(artifact);
+    }
+
+    for checkpoint in &aux.checkpoints {
+        preimage.extend_from_slice(checkpoint);
+    }
+
+    let reconstructed_state_commitment = Blake2sHasher::hash(&preimage).0.to_vec();
+
+    Ok(ReconstructionResult {
+        reconstructed_state_commitment,
+        history_anchor: tip.history_commitment.clone(),
+    })
+}
+
+pub fn reconstruct_state_at(
+    height: u64,
+    tip: &CommitmentSnapshot,
+    aux: &RestoreAuxData,
+) -> BackendResult<ReconstructionResult> {
+    reconstruct_block(height, tip, aux)
+}
+
 #[cfg(any(test, feature = "prover-mock"))]
 #[derive(Debug, Default, Clone, Copy)]
 pub struct MockFoldingBackend;
@@ -334,10 +598,27 @@ impl FoldingBackend for MockFoldingBackend {
         block_witness: &BlockWitness,
     ) -> BackendResult<(GlobalInstance, GlobalProof)> {
         let next_index = instance_prev.index.saturating_add(1);
-        let instance_commitment = format!("instance-{}", next_index).into_bytes();
+        let state_commitment = format!("state-{}", block_witness.block_number).into_bytes();
+        let rpp_commitment = format!("rpp-{}", next_index).into_bytes();
+        let pruned_commitment = format!("pruned-{}", next_index).into_bytes();
+        let history_commitment = format!("history-{}", next_index).into_bytes();
+        let instance_commitment = derive_combined_commitment(
+            next_index,
+            &state_commitment,
+            &rpp_commitment,
+            &pruned_commitment,
+            &history_commitment,
+        );
         let proof_bytes = format!("proof-{}", block_witness.block_number).into_bytes();
 
-        let instance_next = GlobalInstance::new(next_index, instance_commitment.clone());
+        let instance_next = GlobalInstance {
+            index: next_index,
+            commitment: instance_commitment.clone(),
+            state_commitment,
+            rpp_commitment,
+            pruned_commitment,
+            history_commitment,
+        };
         let proof_next = GlobalProof::new(
             instance_commitment,
             proof_bytes,
@@ -359,13 +640,21 @@ fn derive_combined_commitment(
     index: u64,
     state_commitment: &[u8],
     rpp_commitment: &[u8],
+    pruned_commitment: &[u8],
+    history_commitment: &[u8],
 ) -> Vec<u8> {
     let mut preimage = Vec::with_capacity(
-        std::mem::size_of::<u64>() + state_commitment.len() + rpp_commitment.len(),
+        std::mem::size_of::<u64>()
+            + state_commitment.len()
+            + rpp_commitment.len()
+            + pruned_commitment.len()
+            + history_commitment.len(),
     );
     preimage.extend_from_slice(&index.to_le_bytes());
     preimage.extend_from_slice(state_commitment);
     preimage.extend_from_slice(rpp_commitment);
+    preimage.extend_from_slice(pruned_commitment);
+    preimage.extend_from_slice(history_commitment);
 
     Blake2sHasher::hash(&preimage).0.to_vec()
 }
@@ -392,9 +681,20 @@ mod tests {
             .fold(&instance, &proof, &witness)
             .expect("mock fold succeeds");
 
+        let expected_commitment = derive_combined_commitment(
+            1,
+            b"state-42",
+            b"rpp-1",
+            b"pruned-1",
+            b"history-1",
+        );
+
         assert_eq!(next_instance.index, 1);
-        assert_eq!(next_instance.commitment, b"instance-1".to_vec());
-        assert_eq!(next_proof.instance_commitment.as_slice(), b"instance-1");
+        assert_eq!(next_instance.commitment, expected_commitment);
+        assert_eq!(
+            next_proof.instance_commitment.as_slice(),
+            next_instance.commitment.as_slice()
+        );
         assert_eq!(next_proof.proof_bytes.as_slice(), b"proof-42");
         assert_eq!(next_proof.handle.vk_id.as_slice(), b"mock-folding-vk");
         assert_eq!(next_proof.handle.version, ProofVersion::AggregatedV1);
@@ -460,17 +760,23 @@ mod tests {
                 .expect("pipeline fold succeeds");
 
         let expected_index = starting_index + 1;
-        let expected_commitment = format!("instance-{}", expected_index);
+        let expected_commitment = derive_combined_commitment(
+            expected_index,
+            &instance_next.state_commitment,
+            &instance_next.rpp_commitment,
+            &instance_next.pruned_commitment,
+            &instance_next.history_commitment,
+        );
         let expected_proof_bytes = format!("proof-{}", witness_block);
 
         assert_eq!(instance_next.index, expected_index);
-        assert_eq!(
-            instance_next.commitment,
-            expected_commitment.as_bytes().to_vec()
-        );
+        assert_eq!(instance_next.commitment, expected_commitment);
+        assert!(!instance_next.state_commitment.is_empty());
+        assert!(!instance_next.pruned_commitment.is_empty());
+        assert!(!instance_next.history_commitment.is_empty());
         assert_eq!(
             proof_next.instance_commitment.as_slice(),
-            expected_commitment.as_bytes()
+            expected_commitment.as_slice()
         );
         assert_eq!(
             proof_next.proof_bytes.as_slice(),
@@ -498,10 +804,14 @@ mod tests {
         assert_eq!(instance.index, index);
         assert_eq!(instance.state_commitment, state_commitment);
         assert_eq!(instance.rpp_commitment, rpp_commitment);
+        assert_eq!(instance.pruned_commitment, instance.rpp_commitment);
+        assert_eq!(instance.history_commitment, instance.rpp_commitment);
 
         let mut preimage = Vec::new();
         preimage.extend_from_slice(&index.to_le_bytes());
         preimage.extend_from_slice(b"state-root");
+        preimage.extend_from_slice(b"rpp-root");
+        preimage.extend_from_slice(b"rpp-root");
         preimage.extend_from_slice(b"rpp-root");
 
         let expected_commitment = Blake2sHasher::hash(&preimage).0.to_vec();
@@ -519,12 +829,58 @@ mod tests {
     }
 
     #[test]
+    fn pruning_air_inputs_enforce_links() {
+        let previous = CommitmentSnapshot::new(1, b"state-1", b"rpp-1", b"pruned-1", b"history-1");
+        let next = CommitmentSnapshot::new(2, b"state-2", b"rpp-2", b"history-1", b"history-2");
+
+        let inputs = PruningAirPublicInputs {
+            previous: previous.clone(),
+            next: next.clone(),
+            start_state_commitment: previous.state_commitment.clone(),
+            end_state_commitment: next.state_commitment.clone(),
+            inclusion_proofs_ok: true,
+            completeness_checks_ok: true,
+        };
+
+        assert!(inputs.enforce().is_ok());
+
+        let mut broken = inputs.clone();
+        broken.completeness_checks_ok = false;
+
+        assert!(broken.enforce().is_err());
+    }
+
+    #[test]
+    fn reconstruct_block_hashes_inputs_into_state_anchor() {
+        let tip = CommitmentSnapshot::new(5, b"state-tip", b"rpp-tip", b"pruned-tip", b"history-tip");
+        let aux = RestoreAuxData {
+            commitment_chain: vec![
+                CommitmentSnapshot::new(4, b"state-4", b"rpp-4", b"pruned-4", b"history-4"),
+                tip.clone(),
+            ],
+            parent_state_commitment: b"parent-state".to_vec(),
+            execution_rules: b"rules".to_vec(),
+            proof_artifacts: vec![b"proof-a".to_vec(), b"proof-b".to_vec()],
+            chain_spec: b"chain-spec".to_vec(),
+            checkpoints: vec![b"checkpoint".to_vec()],
+        };
+
+        let reconstructed = reconstruct_block(4, &tip, &aux).expect("reconstruction succeeds");
+        assert_eq!(reconstructed.history_anchor, tip.history_commitment);
+
+        let reproduced = reconstruct_state_at(4, &tip, &aux).expect("state reconstruction succeeds");
+        assert_eq!(reconstructed, reproduced);
+    }
+
+    #[test]
     fn header_fields_expose_state_and_rpp_commitments() {
         let instance = GlobalInstance::from_state_and_rpp(99, b"state-h", b"rpp-h");
-        let (state_header, rpp_header) = instance.to_header_fields();
+        let header = instance.to_header_fields();
 
-        assert_eq!(state_header, instance.state_commitment.as_slice());
-        assert_eq!(rpp_header, instance.rpp_commitment.as_slice());
+        assert_eq!(header.state_commitment, instance.state_commitment.as_slice());
+        assert_eq!(header.rpp_commitment, instance.rpp_commitment.as_slice());
+        assert_eq!(header.pruned_commitment, instance.pruned_commitment.as_slice());
+        assert_eq!(header.history_commitment, instance.history_commitment.as_slice());
     }
 
     #[test]
@@ -536,10 +892,17 @@ mod tests {
             commitment: Vec::new(),
             state_commitment: b"state-fold".to_vec(),
             rpp_commitment: b"rpp-fold".to_vec(),
+            pruned_commitment: b"pruned-fold".to_vec(),
+            history_commitment: b"history-fold".to_vec(),
         };
 
-        let derived_commitment =
-            derive_combined_commitment(index, &instance.state_commitment, &instance.rpp_commitment);
+        let derived_commitment = derive_combined_commitment(
+            index,
+            &instance.state_commitment,
+            &instance.rpp_commitment,
+            &instance.pruned_commitment,
+            &instance.history_commitment,
+        );
         let proof = GlobalProof::new(
             &derived_commitment,
             b"proof-fold",
@@ -554,8 +917,15 @@ mod tests {
                 .expect("pipeline fold succeeds");
 
         assert_eq!(next_instance.index, instance.index + 1);
-        assert_eq!(next_proof.instance_commitment.as_slice(), b"instance-4");
-        assert_eq!(next_instance.commitment, b"instance-4".to_vec());
+        let expected_commitment = derive_combined_commitment(
+            next_instance.index,
+            &next_instance.state_commitment,
+            &next_instance.rpp_commitment,
+            &next_instance.pruned_commitment,
+            &next_instance.history_commitment,
+        );
+        assert_eq!(next_proof.instance_commitment.as_slice(), expected_commitment);
+        assert_eq!(next_instance.commitment, expected_commitment);
     }
 
     #[test]

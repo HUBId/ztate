@@ -12,7 +12,7 @@
 
 ## Verifier/accumulator dependencies
 - The node verifier currently recomputes recursive commitments to validate the proof payload. Moving to `fold_global` means the accumulator needs access to the **`GlobalInstance` commitment chain** and should verify against `GlobalProofHandle::proof_commitment` instead of the Poseidon-based recursive hash.
-- Final ledger checks that depend on `StateCommitmentSnapshot` (e.g., pruning/state roots) will need to pull the same fields from the folded instance headers (`GlobalInstance::to_header_fields`) to avoid duplicating validation logic.
+- Final ledger checks that depend on `StateCommitmentSnapshot` (e.g., pruning/state roots) should pull the state, RPP, pruned, and history commitments from the folded instance headers via `GlobalInstance::to_header_fields` (which now returns a structured `CommitmentView`) to avoid duplicating validation logic.
 
 ## Open items for the refactor
 - Define the **byte/hex normalization** between existing `TaggedDigestHex` fields and the byte vectors expected by `GlobalInstance`/`GlobalProof` constructors.
