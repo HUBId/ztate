@@ -12,10 +12,10 @@ use crate::identity_tree::{IdentityCommitmentProof, IdentityCommitmentTree, IDEN
 use crate::proof_system::ProofVerifierRegistry;
 use crate::reputation::{self, ReputationParams, Tier, TierRequirementError, TimetokeParams};
 use crate::rpp::{
-    AccountBalanceWitness, ConsensusApproval, ConsensusWitness, GlobalStateCommitments,
-    ModuleWitnessBundle, ProofArtifact, ReputationEventKind, ReputationRecord, ReputationWitness,
-    TimetokeRecord, TimetokeWitness, TransactionUtxoSnapshot, TransactionWitness, UtxoOutpoint,
-    UtxoRecord, ZsiRecord, ZsiWitness,
+    AccountBalanceWitness, BlockWitness, BlockWitnessBuilder, ConsensusApproval, ConsensusWitness,
+    GlobalStateCommitments, MerklePathWitness, ModuleWitnessBundle, ProofArtifact,
+    ReputationEventKind, ReputationRecord, ReputationWitness, TimetokeRecord, TimetokeWitness,
+    TransactionUtxoSnapshot, TransactionWitness, UtxoOutpoint, UtxoRecord, ZsiRecord, ZsiWitness,
 };
 use crate::state::{
     GlobalState, ProofRegistry, ReputationState, StoredUtxo, TimetokeState, UtxoState, ZsiRegistry,
@@ -1404,6 +1404,7 @@ enum RewardSource {
 
 #[derive(Default)]
 struct ModuleWitnessBook {
+    block: Option<BlockWitness>,
     transactions: Vec<TransactionWitness>,
     timetoke: Vec<TimetokeWitness>,
     reputation: Vec<ReputationWitness>,
@@ -1412,6 +1413,10 @@ struct ModuleWitnessBook {
 }
 
 impl ModuleWitnessBook {
+    fn record_block(&mut self, witness: BlockWitness) {
+        self.block = Some(witness);
+    }
+
     fn record_transaction(&mut self, witness: TransactionWitness) {
         self.transactions.push(witness);
     }
@@ -1433,8 +1438,29 @@ impl ModuleWitnessBook {
     }
 
     fn drain(&mut self) -> ModuleWitnessBundle {
+        let transactions = mem::take(&mut self.transactions);
+        let block = self.block.take().or_else(|| {
+            let paths = (0..transactions.len())
+                .map(|_| MerklePathWitness::new(0, Vec::new()))
+                .collect::<ChainResult<Vec<_>>>();
+
+            let paths = match paths {
+                Ok(paths) => paths,
+                Err(_) => return None,
+            };
+
+            BlockWitnessBuilder::new()
+                .with_expected_path_depth(0)
+                .with_transactions(transactions.clone())
+                .with_transaction_paths(paths)
+                .with_pruning_proofs(Vec::new())
+                .build()
+                .ok()
+        });
+
         ModuleWitnessBundle {
-            transactions: mem::take(&mut self.transactions),
+            block,
+            transactions,
             timetoke: mem::take(&mut self.timetoke),
             reputation: mem::take(&mut self.reputation),
             zsi: mem::take(&mut self.zsi),
