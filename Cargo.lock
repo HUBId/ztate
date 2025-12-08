@@ -8001,11 +8001,14 @@ dependencies = [
  "blake2",
  "blake3",
  "hex",
+ "once_cell",
+ "opentelemetry 0.30.0",
  "serde",
  "serde_json",
  "tempfile",
  "thiserror 2.0.12",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -10161,6 +10164,7 @@ dependencies = [
  "sha2",
  "tempfile",
  "thiserror 2.0.12",
+ "tracing",
 ]
 
 [[package]]

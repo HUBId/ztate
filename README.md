@@ -57,7 +57,11 @@ slashing as described in the Malachite architecture plan.【F:rpp/consensus/src/
   verification steps, consult [docs/wallet_release_status.md](docs/wallet_release_status.md). For upcoming priorities beyond
   Phase 4 (hardware packaging, mobile UI, multisig automation, etc.) see the
   [wallet roadmap](docs/wallet_future_roadmap.md) so contributions line up with
-  the published backlog.【F:docs/wallet_future_roadmap.md†L1-L60】
+  the published backlog.【F:docs/wallet_future_roadmap.md†L1-L60】 The
+  Nova-Folding-Demo [playbook](docs/nova_folding_demo.md) plus
+  [`scripts/demo_nova_folding.sh`](scripts/demo_nova_folding.sh) bootstrap
+  `I_boot`/`π_boot`, falten drei Blöcke mit dem Mock-Backend und validieren die
+  Handles end-to-end, sodass Tester den neuen Flow reproduzieren können.【F:docs/nova_folding_demo.md†L1-L40】【F:scripts/demo_nova_folding.sh†L1-L15】
 
 ### Wallet feature flags and `[wallet.*]` scopes
 

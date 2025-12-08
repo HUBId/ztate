@@ -19,6 +19,7 @@ frequently consulted references.
 ## Core guides
 
 - [`rpp-node` operator guide](rpp_node_operator_guide.md)
+- [Nova-Folding-Demo: I_boot/π_boot + Mock-Backend](nova_folding_demo.md)
 - [Wallet integration feature reference](wallet_integration.md)
 - [Configuration guide](configuration.md)
 - [Snapshot streaming protocol](network/snapshots.md)
