@@ -410,6 +410,113 @@ fn proof_version_label(version: ProofVersion) -> &'static str {
     }
 }
 
+fn parse_proof_version_label(label: &str) -> Option<ProofVersion> {
+    match label {
+        "aggregated-v1" => Some(ProofVersion::AggregatedV1),
+        "nova-v2" => Some(ProofVersion::NovaV2),
+        _ => None,
+    }
+}
+
+/// Validate a [`GlobalProof`] against the commitments surfaced in the
+/// [`BlockHeader`].
+///
+/// The helper only depends on data available to light clients: the header
+/// and the serialized proof payload. It enforces:
+///
+/// * The header's `global_instance_commitment` matches the commitment inside
+///   the proof payload.
+/// * The header's `global_proof_handle` matches the proof payload (Blake2s
+///   commitment, verification-key ID, and semantic version label).
+/// * The proof payload hashes back to the commitment stored in its handle.
+/// * The proof version permitted for the header height (via
+///   [`ProofVersion::for_height_and_epoch`]) matches both the header label and
+///   the proof handle.
+pub fn verify_global_proof(header: &BlockHeader, global_proof: &GlobalProof) -> bool {
+    verify_header_proof_pair(header, global_proof).is_ok()
+}
+
+fn verify_header_proof_pair(header: &BlockHeader, global_proof: &GlobalProof) -> ChainResult<()> {
+    let instance_commitment_hex = header.global_instance_commitment.as_ref().ok_or_else(|| {
+        ChainError::Crypto("global instance commitment missing from header".into())
+    })?;
+
+    let instance_commitment = hex::decode(instance_commitment_hex).map_err(|err| {
+        ChainError::Crypto(format!(
+            "invalid global instance commitment encoding '{}': {err}",
+            instance_commitment_hex
+        ))
+    })?;
+
+    if instance_commitment.as_slice() != global_proof.instance_commitment.as_slice() {
+        return Err(ChainError::Crypto(
+            "global instance commitment mismatch in header".into(),
+        ));
+    }
+
+    let handle_summary = header
+        .global_proof_handle
+        .as_ref()
+        .ok_or_else(|| ChainError::Crypto("global proof handle missing from header".into()))?;
+
+    let handle_commitment = hex::decode(&handle_summary.proof_commitment).map_err(|err| {
+        ChainError::Crypto(format!(
+            "invalid global proof commitment encoding '{}': {err}",
+            handle_summary.proof_commitment
+        ))
+    })?;
+
+    if handle_commitment.as_slice() != global_proof.handle.proof_commitment {
+        return Err(ChainError::Crypto(
+            "global proof commitment mismatch in header".into(),
+        ));
+    }
+
+    let header_vk = hex::decode(&handle_summary.vk_id).map_err(|err| {
+        ChainError::Crypto(format!(
+            "invalid global proof vk id '{}': {err}",
+            handle_summary.vk_id
+        ))
+    })?;
+
+    if header_vk.as_slice() != global_proof.handle.vk_id.as_slice() {
+        return Err(ChainError::Crypto(
+            "global proof vk id mismatch in header".into(),
+        ));
+    }
+
+    let Some(version) = parse_proof_version_label(&handle_summary.version) else {
+        return Err(ChainError::Crypto(format!(
+            "unsupported global proof version label '{}'",
+            handle_summary.version
+        )));
+    };
+
+    let expected_version = ProofVersion::for_height_and_epoch(Some(header.height), None);
+
+    if version != expected_version || global_proof.handle.version != expected_version {
+        return Err(ChainError::Crypto(
+            "global proof version not permitted for height".into(),
+        ));
+    }
+
+    let expected_label = proof_version_label(expected_version);
+    if handle_summary.version != expected_label {
+        return Err(ChainError::Crypto(
+            "global proof version label mismatch".into(),
+        ));
+    }
+
+    let proof_commitment = Blake2sHasher::hash(global_proof.proof_bytes.as_slice());
+    if proof_commitment.0 != global_proof.handle.proof_commitment {
+        return Err(ChainError::Crypto(
+            "global proof payload does not match handle commitment".into(),
+        ));
+    }
+
+    Ok(())
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TimetokeUpdate {
     pub identity: Address,
@@ -1915,6 +2022,20 @@ impl Block {
             return Ok(());
         };
 
+        if self.header.global_instance_commitment.is_some()
+            || self.header.global_proof_handle.is_some()
+        {
+            verify_header_proof_pair(&self.header, proof)?;
+        }
+
+        let expected_version = ProofVersion::for_height_and_epoch(Some(self.header.height), None);
+        if expected_version == ProofVersion::NovaV2 && proof.handle.version != ProofVersion::NovaV2
+        {
+            return Err(ChainError::Crypto(
+                "nova-v2 folding proof required after cutover".into(),
+            ));
+        }
+
         let expected_commitment = hex::encode(instance.commitment.as_slice());
 
         if let Some(header_state) = &self.header.global_instance_commitment {
@@ -1923,48 +2044,6 @@ impl Block {
                     "global instance commitment mismatch in header".into(),
                 ));
             }
-        }
-
-        let expected_version = ProofVersion::for_height_and_epoch(Some(self.header.height), None);
-
-        if let Some(handle) = &self.header.global_proof_handle {
-            let header_commitment = hex::decode(&handle.proof_commitment).map_err(|err| {
-                ChainError::Crypto(format!(
-                    "invalid global proof commitment encoding '{}': {err}",
-                    handle.proof_commitment
-                ))
-            })?;
-
-            if header_commitment.as_slice() != proof.handle.proof_commitment {
-                return Err(ChainError::Crypto(
-                    "global proof commitment mismatch in header".into(),
-                ));
-            }
-
-            let header_vk = hex::decode(&handle.vk_id).map_err(|err| {
-                ChainError::Crypto(format!(
-                    "invalid global proof vk id '{}': {err}",
-                    handle.vk_id
-                ))
-            })?;
-            if header_vk.as_slice() != proof.handle.vk_id.as_slice() {
-                return Err(ChainError::Crypto(
-                    "global proof vk id mismatch in header".into(),
-                ));
-            }
-
-            if handle.version != proof_version_label(expected_version) {
-                return Err(ChainError::Crypto(
-                    "global proof version not permitted for height".into(),
-                ));
-            }
-        }
-
-        if expected_version == ProofVersion::NovaV2 && proof.handle.version != ProofVersion::NovaV2
-        {
-            return Err(ChainError::Crypto(
-                "nova-v2 folding proof required after cutover".into(),
-            ));
         }
 
         let (state_header, rpp_header) = instance.to_header_fields();
@@ -2693,6 +2772,65 @@ mod tests {
     use ed25519_dalek::{Keypair, PublicKey, SecretKey, Signature, Signer};
     use rand::rngs::OsRng;
     use rpp_pruning::{DIGEST_LENGTH, DOMAIN_TAG_LENGTH};
+
+    fn sample_header_and_global_proof() -> (BlockHeader, GlobalProof) {
+        let mut header = BlockHeader::new(
+            1,
+            ZERO_DIGEST_HEX.into(),
+            ZERO_DIGEST_HEX.into(),
+            ZERO_DIGEST_HEX.into(),
+            ZERO_DIGEST_HEX.into(),
+            ZERO_DIGEST_HEX.into(),
+            ZERO_DIGEST_HEX.into(),
+            ZERO_DIGEST_HEX.into(),
+            ZERO_DIGEST_HEX.into(),
+            "1000".into(),
+            ZERO_DIGEST_HEX.into(),
+            ZERO_DIGEST_HEX.into(),
+            ZERO_DIGEST_HEX.into(),
+            "proposer-address".into(),
+            "tier-0".into(),
+            0,
+        );
+
+        let instance = GlobalInstance::from_state_and_rpp(7, b"state-root", b"rpp-root");
+        let proof = GlobalProof::new(
+            instance.commitment.clone(),
+            b"fold-proof-7",
+            b"mock-folding-vk",
+            ProofVersion::AggregatedV1,
+        )
+        .expect("mock proof creation succeeds");
+
+        header = header.with_global_instance(&instance, Some(&proof.handle));
+
+        (header, proof)
+    }
+
+    #[test]
+    fn verify_global_proof_only_needs_header_and_payload() {
+        let (header, proof) = sample_header_and_global_proof();
+
+        assert!(verify_global_proof(&header, &proof));
+    }
+
+    #[test]
+    fn verify_global_proof_rejects_header_mismatch() {
+        let (mut header, proof) = sample_header_and_global_proof();
+
+        header.global_instance_commitment = Some("deadbeef".into());
+
+        assert!(!verify_global_proof(&header, &proof));
+    }
+
+    #[test]
+    fn verify_global_proof_rejects_version_after_cutover() {
+        let (mut header, proof) = sample_header_and_global_proof();
+
+        header.height = 2_000_000;
+
+        assert!(!verify_global_proof(&header, &proof));
+    }
 
     fn seeded_keypair(seed: u8) -> Keypair {
         let secret = SecretKey::from_bytes(&[seed; 32]).expect("secret");
