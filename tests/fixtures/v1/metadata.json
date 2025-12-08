@@ -1,0 +1,12 @@
+{
+  "version": "v1",
+  "proof_bytes": 24164,
+  "vk_bytes": 10012,
+  "roundtrip_latency_ms": 92,
+  "rotation_latency_ms": 76,
+  "migration_tag": "2024-06-hotfix",
+  "api_contract": {
+    "required_fields": ["version", "proof", "public_inputs", "vk_commitment", "created_at"],
+    "status": "deprecated"
+  }
+}

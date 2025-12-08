@@ -122,3 +122,14 @@ The restore drops the new schema and reinstates the previous store. Repeat the
 `rpp-wallet migrate --schema-target 3` command only after investigating the
 failure and capturing fresh backups. Never attempt to downgrade a live database
 without restoring from a clean backup archive.
+
+## Fixture compatibility checkpoints
+
+The CI matrix keeps a small catalogue of historical proof+VK pairs so that
+migration tooling can assert we do not regress on backwards compatibility. The
+following tags are referenced by the fixtures and validated in CI:
+
+| Version | Migration tag      | Notes                               |
+|---------|-------------------|--------------------------------------|
+| v1      | 2024-06-hotfix    | Legacy rollout with cached witnesses |
+| v2      | 2024-08-rollup    | Rollup release with rotation tweaks  |

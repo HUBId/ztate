@@ -1,0 +1,10 @@
+{
+  "version": "v1",
+  "commitment": "vk-v1",
+  "rotation": [
+    [1, 0, 0],
+    [0, 1, 0],
+    [0, 0, 1]
+  ],
+  "hash": "sha256:8b6f8512a7c5a1e62c1af9b6bb3b814c5e4c234f9bb72e3f0ce6e5fa4883e123"
+}
