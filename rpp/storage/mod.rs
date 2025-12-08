@@ -13,9 +13,13 @@ use serde::{Deserialize, Serialize};
 
 use crate::consensus::ConsensusCertificate;
 use crate::errors::{ChainError, ChainResult};
+use crate::proof_backend::Blake2sHasher;
 use crate::rpp::UtxoOutpoint;
 use crate::state::StoredUtxo;
+use crate::stwo::aggregation::StateCommitmentSnapshot;
 use crate::zk::backend_interface::folding::{GlobalInstance, GlobalProof};
+use crate::zk::backend_interface::proof_version::ProofVersion;
+use hex;
 use tracing::{info, warn};
 pub mod blueprint;
 pub mod pruner;
@@ -537,6 +541,62 @@ impl Storage {
         }
 
         Ok(records)
+    }
+
+    pub fn bootstrap_global_folding_from_cut(
+        &self,
+        tip: &TipReference,
+        state_roots: &StateCommitmentSnapshot,
+        pruning_commitment_hex: &str,
+        proof_bytes: &[u8],
+        vk_id: &[u8],
+    ) -> ChainResult<(GlobalInstanceRecord, GlobalProofRecord)> {
+        if proof_bytes.is_empty() {
+            return Err(ChainError::Config(
+                "bootstrap folding proof bytes cannot be empty".into(),
+            ));
+        }
+
+        let state_commitment = derive_state_commitment(state_roots)?;
+        let pruning_commitment =
+            decode_hex_commitment("pruning commitment", pruning_commitment_hex)?;
+
+        let instance =
+            GlobalInstance::from_state_and_rpp(tip.height, state_commitment, pruning_commitment);
+        let proof = GlobalProof::new(
+            &instance.commitment,
+            proof_bytes,
+            vk_id,
+            ProofVersion::NovaV2,
+        )?;
+
+        self.persist_global_instance_by_block(&tip.chain_id, tip.height, &tip.hash, &instance)?;
+        self.persist_global_proof_by_tip(
+            &tip.chain_id,
+            tip.height,
+            &tip.hash,
+            tip.height,
+            Some(&proof),
+        )?;
+
+        info!(
+            height = tip.height,
+            hash = %tip.hash,
+            vk = %String::from_utf8_lossy(vk_id),
+            "bootstrapped folding instance and proof from cut",
+        );
+
+        Ok((
+            GlobalInstanceRecord {
+                block_height: tip.height,
+                block_hash: tip.hash.clone(),
+                instance,
+            },
+            GlobalProofRecord {
+                produced_at_height: tip.height,
+                proof,
+            },
+        ))
     }
 
     pub fn persist_global_proof_by_tip(
@@ -1062,6 +1122,36 @@ fn pruning_proof_suffix(height: u64) -> Vec<u8> {
     suffix
 }
 
+fn decode_hex_commitment(label: &str, value: &str) -> ChainResult<Vec<u8>> {
+    let bytes = hex::decode(value)
+        .map_err(|err| ChainError::Config(format!("invalid {label} encoding '{value}': {err}")))?;
+
+    if bytes.len() != 32 {
+        return Err(ChainError::Config(format!(
+            "{label} must be 32 bytes, found {}",
+            bytes.len()
+        )));
+    }
+
+    Ok(bytes)
+}
+
+fn derive_state_commitment(snapshot: &StateCommitmentSnapshot) -> ChainResult<Vec<u8>> {
+    let mut preimage = Vec::with_capacity(32 * 6);
+    for (label, value) in [
+        ("global state root", snapshot.global_state_root.as_str()),
+        ("utxo root", snapshot.utxo_root.as_str()),
+        ("reputation root", snapshot.reputation_root.as_str()),
+        ("timetoke root", snapshot.timetoke_root.as_str()),
+        ("zsi root", snapshot.zsi_root.as_str()),
+        ("proof root", snapshot.proof_root.as_str()),
+    ] {
+        preimage.extend_from_slice(&decode_hex_commitment(label, value)?);
+    }
+
+    Ok(Blake2sHasher::hash(&preimage).0.to_vec())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1220,6 +1310,77 @@ mod tests {
             .expect("proof present");
         assert_eq!(loaded.produced_at_height, 4);
         assert_eq!(loaded.proof, proof);
+    }
+
+    #[test]
+    fn bootstraps_fold_pipeline_from_cut_tip() {
+        let dir = tempdir().expect("tempdir");
+        let storage = Storage::open(dir.path()).expect("open storage");
+        let tip = TipReference {
+            chain_id: "chain-C".into(),
+            height: 55,
+            hash: "cut-hash".into(),
+        };
+
+        let snapshot = StateCommitmentSnapshot::from_header_fields(
+            "11".repeat(32),
+            "22".repeat(32),
+            "33".repeat(32),
+            "44".repeat(32),
+            "55".repeat(32),
+            "66".repeat(32),
+        );
+        let pruning_commitment = "aa".repeat(32);
+        let proof_bytes = b"nova-fold-proof";
+        let vk_id = b"nova-vk-id";
+
+        let legacy_instance = GlobalInstance::new(1, b"legacy-instance");
+        storage
+            .persist_global_instance_by_block(&tip.chain_id, 1, "legacy", &legacy_instance)
+            .expect("persist legacy instance");
+
+        let (instance_record, proof_record) = storage
+            .bootstrap_global_folding_from_cut(
+                &tip,
+                &snapshot,
+                &pruning_commitment,
+                proof_bytes,
+                vk_id,
+            )
+            .expect("bootstrap from cut");
+
+        let expected_state_commitment = derive_state_commitment(&snapshot).expect("state digest");
+        let decoded_pruning = hex::decode(&pruning_commitment).expect("decode pruning");
+        let mut combined_preimage = Vec::new();
+        combined_preimage.extend_from_slice(&tip.height.to_le_bytes());
+        combined_preimage.extend_from_slice(&expected_state_commitment);
+        combined_preimage.extend_from_slice(&decoded_pruning);
+        let expected_commitment = Blake2sHasher::hash(&combined_preimage).0.to_vec();
+
+        assert_eq!(instance_record.block_height, tip.height);
+        assert_eq!(instance_record.block_hash, tip.hash);
+        assert_eq!(instance_record.instance.index, tip.height);
+        assert_eq!(instance_record.instance.commitment, expected_commitment);
+        assert_eq!(
+            instance_record.instance.state_commitment,
+            expected_state_commitment
+        );
+        assert_eq!(instance_record.instance.rpp_commitment, decoded_pruning);
+
+        assert_eq!(proof_record.produced_at_height, tip.height);
+        assert_eq!(proof_record.proof.handle.version, ProofVersion::NovaV2);
+        assert_eq!(proof_record.proof.handle.vk_id.as_slice(), vk_id);
+        assert_eq!(
+            proof_record.proof.instance_commitment.as_slice(),
+            expected_commitment
+        );
+        assert_eq!(proof_record.proof.proof_bytes.as_slice(), proof_bytes);
+
+        let persisted_legacy = storage
+            .load_global_instance_by_block(&tip.chain_id, 1, "legacy")
+            .expect("load legacy")
+            .expect("legacy present");
+        assert_eq!(persisted_legacy, legacy_instance);
     }
 
     fn dummy_pruning_proof() -> StarkProof {
