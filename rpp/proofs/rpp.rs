@@ -12,6 +12,7 @@ use crate::proof_backend::{
 };
 use crate::state::{merkle::compute_merkle_root, StoredUtxo};
 use crate::types::Address;
+use crate::types::PruningProof;
 
 /// 32-byte digest representing a commitment root.
 pub type CommitmentDigest = [u8; 32];
@@ -548,6 +549,120 @@ impl TransactionUtxoSnapshot {
     }
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MerklePathWitness {
+    pub siblings: Vec<CommitmentDigest>,
+}
+
+impl MerklePathWitness {
+    pub fn new(expected_depth: u32, siblings: Vec<CommitmentDigest>) -> ChainResult<Self> {
+        let path = Self { siblings };
+        path.validate_depth(expected_depth)?;
+        Ok(path)
+    }
+
+    pub fn depth(&self) -> usize {
+        self.siblings.len()
+    }
+
+    pub fn validate_depth(&self, expected_depth: u32) -> ChainResult<()> {
+        if self.depth() != expected_depth as usize {
+            return Err(ChainError::Config(format!(
+                "merkle path depth mismatch: expected {expected_depth}, found {}",
+                self.depth()
+            )));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BlockWitness {
+    pub transactions: Vec<TransactionWitness>,
+    pub transaction_paths: Vec<MerklePathWitness>,
+    pub pruning_proofs: Vec<PruningProof>,
+}
+
+impl BlockWitness {
+    pub fn validate(&self, expected_tx_count: usize, expected_path_depth: u32) -> ChainResult<()> {
+        if self.transactions.len() != expected_tx_count {
+            return Err(ChainError::Config(format!(
+                "block witness transaction count mismatch: expected {expected_tx_count}, found {}",
+                self.transactions.len()
+            )));
+        }
+
+        if self.transaction_paths.len() != expected_tx_count {
+            return Err(ChainError::Config(format!(
+                "block witness merkle path count mismatch: expected {expected_tx_count}, found {}",
+                self.transaction_paths.len()
+            )));
+        }
+
+        for (index, path) in self.transaction_paths.iter().enumerate() {
+            path.validate_depth(expected_path_depth)
+                .map_err(|err| ChainError::Config(format!("transaction #{index} {err}")))?;
+        }
+
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct BlockWitnessBuilder {
+    transactions: Vec<TransactionWitness>,
+    transaction_paths: Vec<MerklePathWitness>,
+    pruning_proofs: Vec<PruningProof>,
+    expected_path_depth: Option<u32>,
+}
+
+impl BlockWitnessBuilder {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_expected_path_depth(mut self, depth: u32) -> Self {
+        self.expected_path_depth = Some(depth);
+        self
+    }
+
+    pub fn with_transactions(mut self, transactions: Vec<TransactionWitness>) -> Self {
+        self.transactions = transactions;
+        self
+    }
+
+    pub fn with_transaction_paths(mut self, paths: Vec<MerklePathWitness>) -> Self {
+        self.transaction_paths = paths;
+        self
+    }
+
+    pub fn with_pruning_proofs(mut self, proofs: Vec<PruningProof>) -> Self {
+        self.pruning_proofs = proofs;
+        self
+    }
+
+    pub fn build(self) -> ChainResult<BlockWitness> {
+        let expected_depth = match (self.expected_path_depth, self.transaction_paths.first()) {
+            (Some(depth), _) => depth,
+            (None, Some(path)) => path.depth() as u32,
+            (None, None) => {
+                return Err(ChainError::Config(
+                    "block witness requires a merkle path depth".into(),
+                ))
+            }
+        };
+
+        let witness = BlockWitness {
+            transactions: self.transactions,
+            transaction_paths: self.transaction_paths,
+            pruning_proofs: self.pruning_proofs,
+        };
+
+        witness.validate(witness.transactions.len(), expected_depth)?;
+        Ok(witness)
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TransactionWitness {
     pub tx_id: CommitmentDigest,
@@ -732,6 +847,8 @@ impl ConsensusWitness {
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ModuleWitnessBundle {
+    #[serde(default)]
+    pub block: Option<BlockWitness>,
     pub transactions: Vec<TransactionWitness>,
     pub timetoke: Vec<TimetokeWitness>,
     pub reputation: Vec<ReputationWitness>,
@@ -746,6 +863,10 @@ impl ModuleWitnessBundle {
     const ZSI_DOMAIN: &'static [u8] = b"rpp-zsi-witness";
     const BLOCK_DOMAIN: &'static [u8] = b"rpp-block-witness";
     const CONSENSUS_DOMAIN: &'static [u8] = b"rpp-consensus-witness";
+
+    pub fn record_block(&mut self, witness: BlockWitness) {
+        self.block = Some(witness);
+    }
 
     pub fn record_transaction(&mut self, witness: TransactionWitness) {
         self.transactions.push(witness);
@@ -768,7 +889,8 @@ impl ModuleWitnessBundle {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.transactions.is_empty()
+        self.block.is_none()
+            && self.transactions.is_empty()
             && self.timetoke.is_empty()
             && self.reputation.is_empty()
             && self.zsi.is_empty()
@@ -813,10 +935,21 @@ impl ModuleWitnessBundle {
         ));
         artifacts.push((
             ProofModule::BlockWitness,
-            self.namespaced_commitment(Self::BLOCK_DOMAIN, &[self], CIRCUIT_BLOCK)?,
-            encode_witness_payload(CIRCUIT_BLOCK, self).map_err(|err| {
-                ChainError::Config(format!("serialize block witness bundle: {err}"))
-            })?,
+            self.namespaced_commitment(
+                Self::BLOCK_DOMAIN,
+                &[self
+                    .block
+                    .as_ref()
+                    .ok_or_else(|| ChainError::Config("missing block witness".into()))?],
+                CIRCUIT_BLOCK,
+            )?,
+            encode_witness_payload(
+                CIRCUIT_BLOCK,
+                self.block
+                    .as_ref()
+                    .ok_or_else(|| ChainError::Config("missing block witness".into()))?,
+            )
+            .map_err(|err| ChainError::Config(format!("serialize block witness bundle: {err}")))?,
         ));
         artifacts.push((
             ProofModule::ConsensusWitness,
@@ -1708,6 +1841,7 @@ pub fn schema_lookup(blueprint: &ArchitectureBlueprint) -> BTreeMap<StateModule,
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::pruning_genesis;
     use std::collections::BTreeSet;
 
     fn sample_witness_bundle() -> ModuleWitnessBundle {
@@ -1732,7 +1866,18 @@ mod tests {
             Vec::new(),
             Vec::new(),
         );
-        bundle.record_transaction(tx_witness);
+        bundle.record_transaction(tx_witness.clone());
+
+        let block_witness = BlockWitnessBuilder::new()
+            .with_expected_path_depth(0)
+            .with_transactions(vec![tx_witness])
+            .with_transaction_paths(vec![
+                MerklePathWitness::new(0, Vec::new()).expect("merkle path builds")
+            ])
+            .with_pruning_proofs(vec![pruning_genesis(&"00".repeat(32))])
+            .build()
+            .expect("block witness");
+        bundle.record_block(block_witness);
 
         let previous_timetoke = TimetokeRecord {
             identity: "alice".into(),
@@ -1909,8 +2054,92 @@ mod tests {
             .find(|(module, _, _)| *module == ProofModule::BlockWitness)
             .expect("block witness artifact");
         let block_commitment = bundle
-            .namespaced_commitment(b"rpp-block-witness", &[bundle.clone()], CIRCUIT_BLOCK)
+            .namespaced_commitment(
+                b"rpp-block-witness",
+                &[bundle.block.clone().expect("block witness")],
+                CIRCUIT_BLOCK,
+            )
             .expect("block commitment");
         assert_eq!(block_artifact.1, block_commitment);
+    }
+
+    #[test]
+    fn block_witness_builder_rejects_missing_paths() {
+        let witness = TransactionWitness::new(
+            [0xAA; 32],
+            0,
+            AccountBalanceWitness::new("alice".into(), 1, 0),
+            AccountBalanceWitness::new("alice".into(), 1, 1),
+            None,
+            AccountBalanceWitness::new("bob".into(), 1, 0),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        );
+
+        let result = BlockWitnessBuilder::new()
+            .with_expected_path_depth(0)
+            .with_transactions(vec![witness])
+            .with_transaction_paths(Vec::new())
+            .with_pruning_proofs(Vec::new())
+            .build();
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn block_witness_builder_checks_depth() {
+        let witness = TransactionWitness::new(
+            [0xAB; 32],
+            0,
+            AccountBalanceWitness::new("alice".into(), 1, 0),
+            AccountBalanceWitness::new("alice".into(), 1, 1),
+            None,
+            AccountBalanceWitness::new("bob".into(), 1, 0),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        );
+
+        let result = BlockWitnessBuilder::new()
+            .with_expected_path_depth(2)
+            .with_transactions(vec![witness])
+            .with_transaction_paths(vec![
+                MerklePathWitness::new(1, vec![[0u8; 32]]).expect("path is valid")
+            ])
+            .with_pruning_proofs(Vec::new())
+            .build();
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn block_witness_builder_supports_minimal_witness() {
+        let witness = TransactionWitness::new(
+            [0xAC; 32],
+            0,
+            AccountBalanceWitness::new("alice".into(), 1, 0),
+            AccountBalanceWitness::new("alice".into(), 1, 1),
+            None,
+            AccountBalanceWitness::new("bob".into(), 1, 0),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        );
+
+        let block_witness = BlockWitnessBuilder::new()
+            .with_expected_path_depth(0)
+            .with_transactions(vec![witness.clone()])
+            .with_transaction_paths(vec![
+                MerklePathWitness::new(0, Vec::new()).expect("empty path allowed")
+            ])
+            .with_pruning_proofs(vec![pruning_genesis(&"00".repeat(32))])
+            .build()
+            .expect("block witness builds");
+
+        assert_eq!(block_witness.transactions, vec![witness]);
     }
 }
