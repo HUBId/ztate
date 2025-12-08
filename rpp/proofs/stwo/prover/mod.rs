@@ -324,6 +324,9 @@ impl<'a> WalletProver<'a> {
                 pruning_owned.kind
             )));
         }
+        // TODO(fold_global): route the post-batch recursive aggregation into
+        // `fold_global` so the folding pipeline can consume the same witness
+        // material instead of the legacy `RecursiveAggregator` output.
         let aggregator = RecursiveAggregator::new(self.parameters.clone());
         let state_roots = StateCommitmentSnapshot::from_commitments(state_commitments);
         aggregator.build_witness(

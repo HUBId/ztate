@@ -193,6 +193,9 @@ impl NodeVerifier {
         witness: &super::circuit::recursive::RecursiveWitness,
         state_commitments: &StateCommitmentSnapshot,
     ) -> FieldElement {
+        // TODO(fold_global): swap the legacy recursive hash recomputation with
+        // a `fold_global` verification hook so the accumulator checks the folded
+        // global instance rather than the pre-fold commitment chain.
         let aggregator = RecursiveAggregator::new(self.parameters.clone());
         aggregator.aggregate_commitment(
             witness.previous_commitment.as_deref(),
