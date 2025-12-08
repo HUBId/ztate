@@ -26,6 +26,8 @@ use crate::validator::{
     ValidatorSet,
 };
 use crate::{ConsensusError, ConsensusResult};
+use prover_backend_interface::proof_version::{NOVA_V2_MANDATORY_EPOCH, NOVA_V2_MANDATORY_HEIGHT};
+use prover_backend_interface::ProofVersion;
 use tracing::{info, warn};
 
 static MESSAGE_SENDER: OnceLock<Mutex<Option<UnboundedSender<ConsensusMessage>>>> = OnceLock::new();
@@ -57,6 +59,8 @@ pub struct ConsensusConfig {
     pub monitor_id: ValidatorId,
     pub treasury_accounts: TreasuryAccounts,
     pub witness_pool_weights: WitnessPoolWeights,
+    pub folding_cutover_height: u64,
+    pub folding_cutover_epoch: u64,
 }
 
 impl ConsensusConfig {
@@ -66,7 +70,7 @@ impl ConsensusConfig {
         base_reward: u64,
         leader_bonus: f64,
     ) -> Self {
-        Self {
+        let config = Self {
             view_timeout: Duration::from_millis(view_timeout_ms),
             precommit_timeout: Duration::from_millis(precommit_timeout_ms),
             base_reward,
@@ -81,7 +85,16 @@ impl ConsensusConfig {
             monitor_id: "consensus-monitor".to_string(),
             treasury_accounts: TreasuryAccounts::default(),
             witness_pool_weights: WitnessPoolWeights::default(),
-        }
+            folding_cutover_height: NOVA_V2_MANDATORY_HEIGHT,
+            folding_cutover_epoch: NOVA_V2_MANDATORY_EPOCH,
+        };
+
+        ProofVersion::configure_cutover(
+            config.folding_cutover_height,
+            config.folding_cutover_epoch,
+        );
+
+        config
     }
 
     pub fn with_witness_params(
@@ -129,6 +142,17 @@ impl ConsensusConfig {
     pub fn with_witness_pool_weights(mut self, weights: WitnessPoolWeights) -> Self {
         self.witness_pool_weights = weights;
         self
+    }
+
+    pub fn with_folding_cutover(mut self, height: u64, epoch: u64) -> Self {
+        self.folding_cutover_height = height;
+        self.folding_cutover_epoch = epoch;
+        ProofVersion::configure_cutover(height, epoch);
+        self
+    }
+
+    pub fn folding_cutover_reached(&self, height: u64, epoch: u64) -> bool {
+        height >= self.folding_cutover_height || epoch >= self.folding_cutover_epoch
     }
 
     pub fn treasury_accounts(&self) -> &TreasuryAccounts {

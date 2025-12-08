@@ -55,6 +55,28 @@ tables for deterministic backups, mTLS/RBAC registries, and watch-only account
 metadata, so operators must plan the migration before rolling out the new
 binary.
 
+## Nova V2 folding bootstrap from a cut tip
+
+The Nova folding path now boots from a signed cut rather than the original
+genesis header. The helper `Storage::bootstrap_global_folding_from_cut` accepts
+the cut tip reference, state/pruning commitments, and the Nova proof payload
+(`π_boot`). It derives `I_boot`, signs it with `ProofVersion::NovaV2`, and
+persists both artifacts without touching legacy aggregation records.
+
+Recovery steps:
+
+1. **Record the cutover**: configure the consensus layer with
+   `ConsensusConfig::with_folding_cutover(<height>, <epoch>)` so every node
+   enforces the Nova switch at the same block/epoch.
+2. **Prepare inputs**: capture the state roots and pruning digest of the cut
+   block and export the Nova bootstrap proof and verification key ID.
+3. **Persist bootstrap artifacts**: call
+   `Storage::bootstrap_global_folding_from_cut` with the collected inputs. The
+   method leaves existing aggregated proofs intact and writes `I_boot` and
+   `π_boot` as the source for subsequent folding steps.
+4. **Restart validation**: restart the node to pick up the new cutover values
+   and continue folding from the persisted bootstrap pair.
+
 ### Prerequisites
 
 1. **Backups first.** Take an encrypted snapshot with the Phase 4 backup tool
