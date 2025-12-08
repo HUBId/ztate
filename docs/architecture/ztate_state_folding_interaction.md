@@ -38,7 +38,7 @@ graph TD
 
 ### Light-Client-Pfad
 - **Header-only Check:** `verify_global_proof(header, global_proof)` prüft Commitment, Handle (Commitment + VK-ID) und Versionslabel allein anhand von Header und Proof-Payload. Es werden keine Ledger-Daten oder vorherige Blöcke benötigt.
-- **Serialisierung:** `global_instance_commitment` und `global_proof_handle` werden als lowercase Hex-Strings transportiert; der Handle enthält Commitment, `vk_id` und das semantische Label (`aggregated-v1` oder `nova-v2`). Ein End-to-End-Beispiel befindet sich unter `docs/interfaces/runtime/examples/light_client_global_proof.json`.
+- **Serialisierung & VK-Registry:** `global_instance_commitment` und `global_proof_handle` werden als lowercase Hex-Strings transportiert; der Handle enthält Commitment, `vk_id` und das semantische Label (`aggregated-v1` oder `nova-v2`). Das Label wird über eine zentrale VK-Registry auf die konkret gültige `vk_id` gemappt (siehe `docs/architecture/global_proof_vk_registry.md`). Ein End-to-End-Beispiel befindet sich unter `docs/interfaces/runtime/examples/light_client_global_proof.json`.
 
 ## Übergangsphase: alte Aggregations-Beweise vs. GlobalProofs
 - **Akzeptanzmatrix:** Während der Migration akzeptiert der Validator sowohl legacy Aggregations-Proofs (Poseidon-basierte `recursive_commitment`) als auch neue `GlobalProofHandle`/`GlobalProof`-Paare. Ein Feature-Flag (z. B. `folding-verify`) steuert, ob `verify_global_proof` verpflichtend ist oder optional.
