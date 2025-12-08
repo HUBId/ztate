@@ -4,8 +4,9 @@ use std::sync::Arc;
 
 use prover_backend_interface::folding::{
     fold_pipeline_step, BlockWitness as FoldingBlockWitness, GlobalInstance, GlobalProof,
-    MockFoldingBackend, ProofVersion,
+    MockFoldingBackend,
 };
+use prover_backend_interface::ProofVersion;
 use rpp_pruning::{Envelope, DIGEST_LENGTH};
 use tracing_test::traced_test;
 
