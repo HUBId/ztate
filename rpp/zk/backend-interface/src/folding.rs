@@ -681,13 +681,8 @@ mod tests {
             .fold(&instance, &proof, &witness)
             .expect("mock fold succeeds");
 
-        let expected_commitment = derive_combined_commitment(
-            1,
-            b"state-42",
-            b"rpp-1",
-            b"pruned-1",
-            b"history-1",
-        );
+        let expected_commitment =
+            derive_combined_commitment(1, b"state-42", b"rpp-1", b"pruned-1", b"history-1");
 
         assert_eq!(next_instance.index, 1);
         assert_eq!(next_instance.commitment, expected_commitment);
@@ -736,13 +731,8 @@ mod tests {
 
     #[test]
     fn reconstruct_block_restores_expected_commitments() {
-        let tip_snapshot = CommitmentSnapshot::new(
-            12,
-            b"tip-state",
-            b"tip-rpp",
-            b"tip-pruned",
-            b"tip-history",
-        );
+        let tip_snapshot =
+            CommitmentSnapshot::new(12, b"tip-state", b"tip-rpp", b"tip-pruned", b"tip-history");
 
         let aux = RestoreAuxData {
             commitment_chain: vec![
@@ -785,7 +775,10 @@ mod tests {
             reconstructed.reconstructed_state_commitment,
             expected_commitment
         );
-        assert_eq!(reconstructed.history_anchor, tip_snapshot.history_commitment);
+        assert_eq!(
+            reconstructed.history_anchor,
+            tip_snapshot.history_commitment
+        );
     }
 
     #[cfg(feature = "prover-mock")]
@@ -906,7 +899,8 @@ mod tests {
 
     #[test]
     fn reconstruct_block_hashes_inputs_into_state_anchor() {
-        let tip = CommitmentSnapshot::new(5, b"state-tip", b"rpp-tip", b"pruned-tip", b"history-tip");
+        let tip =
+            CommitmentSnapshot::new(5, b"state-tip", b"rpp-tip", b"pruned-tip", b"history-tip");
         let aux = RestoreAuxData {
             commitment_chain: vec![
                 CommitmentSnapshot::new(4, b"state-4", b"rpp-4", b"pruned-4", b"history-4"),
@@ -922,7 +916,8 @@ mod tests {
         let reconstructed = reconstruct_block(4, &tip, &aux).expect("reconstruction succeeds");
         assert_eq!(reconstructed.history_anchor, tip.history_commitment);
 
-        let reproduced = reconstruct_state_at(4, &tip, &aux).expect("state reconstruction succeeds");
+        let reproduced =
+            reconstruct_state_at(4, &tip, &aux).expect("state reconstruction succeeds");
         assert_eq!(reconstructed, reproduced);
     }
 
@@ -931,10 +926,19 @@ mod tests {
         let instance = GlobalInstance::from_state_and_rpp(99, b"state-h", b"rpp-h");
         let header = instance.to_header_fields();
 
-        assert_eq!(header.state_commitment, instance.state_commitment.as_slice());
+        assert_eq!(
+            header.state_commitment,
+            instance.state_commitment.as_slice()
+        );
         assert_eq!(header.rpp_commitment, instance.rpp_commitment.as_slice());
-        assert_eq!(header.pruned_commitment, instance.pruned_commitment.as_slice());
-        assert_eq!(header.history_commitment, instance.history_commitment.as_slice());
+        assert_eq!(
+            header.pruned_commitment,
+            instance.pruned_commitment.as_slice()
+        );
+        assert_eq!(
+            header.history_commitment,
+            instance.history_commitment.as_slice()
+        );
     }
 
     #[test]
@@ -978,7 +982,10 @@ mod tests {
             &next_instance.pruned_commitment,
             &next_instance.history_commitment,
         );
-        assert_eq!(next_proof.instance_commitment.as_slice(), expected_commitment);
+        assert_eq!(
+            next_proof.instance_commitment.as_slice(),
+            expected_commitment
+        );
         assert_eq!(next_instance.commitment, expected_commitment);
     }
 
