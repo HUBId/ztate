@@ -169,3 +169,94 @@ jobs:
           path: |
             pruning-${{ matrix.backend }}-bf${{ matrix.branch_factor }}.log
             pruning-metrics-${{ matrix.backend }}-bf${{ matrix.branch_factor }}.json
+
+  folding:
+    name: Global proof benchmarks
+    runs-on: ubuntu-latest
+    env:
+      FOLDING_PERF_OUTPUT: folding-perf.json
+      FOLDING_PERF_CHAIN_LENGTH: 256
+      FOLDING_PERF_PROOF_BYTES: 4096
+      FOLDING_MAX_AGGREGATED_KIB: 12
+      FOLDING_MAX_NOVA_KIB: 16
+      FOLDING_MAX_AGGREGATED_VERIFY_MS: 1.5
+      FOLDING_MAX_NOVA_VERIFY_MS: 2.5
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: folding-benchmarks
+
+      - name: Run folding performance sampler
+        run: |
+          set -euo pipefail
+          cargo run -p rpp-chain --bin folding_perf --release \
+            --quiet
+
+      - name: Summarize folding metrics
+        run: |
+          set -euo pipefail
+          jq -r '.runs[] | ["version=" + .version, "avg_bytes=" + (.avg_proof_bytes|tostring), "max_bytes=" + (.max_proof_bytes|tostring), "verify_ms=" + (.verify_per_proof_ms|tostring)] | join("\t")' "${FOLDING_PERF_OUTPUT}" > folding-perf-summary.tsv
+
+      - name: Enforce folding thresholds
+        run: |
+          set -euo pipefail
+
+          agg_limit_bytes=$((FOLDING_MAX_AGGREGATED_KIB * 1024))
+          nova_limit_bytes=$((FOLDING_MAX_NOVA_KIB * 1024))
+
+          agg_bytes=$(jq '.runs[] | select(.version=="AggregatedV1") | .max_proof_bytes' "${FOLDING_PERF_OUTPUT}")
+          nova_bytes=$(jq '.runs[] | select(.version=="NovaV2") | .max_proof_bytes' "${FOLDING_PERF_OUTPUT}")
+          agg_verify=$(jq '.runs[] | select(.version=="AggregatedV1") | .verify_per_proof_ms' "${FOLDING_PERF_OUTPUT}")
+          nova_verify=$(jq '.runs[] | select(.version=="NovaV2") | .verify_per_proof_ms' "${FOLDING_PERF_OUTPUT}")
+
+          if (( $(printf '%.0f' "$agg_bytes") > agg_limit_bytes )); then
+            echo "::error::AggregatedV1 proof size ${agg_bytes}B exceeds limit ${agg_limit_bytes}B"
+            exit 1
+          fi
+          if (( $(printf '%.0f' "$nova_bytes") > nova_limit_bytes )); then
+            echo "::error::NovaV2 proof size ${nova_bytes}B exceeds limit ${nova_limit_bytes}B"
+            exit 1
+          fi
+
+          python - <<'PY'
+import os, sys, json
+payload = json.load(open(os.environ['FOLDING_PERF_OUTPUT']))
+agg = next(run for run in payload['runs'] if run['version'] == 'AggregatedV1')
+limit = float(os.environ['FOLDING_MAX_AGGREGATED_VERIFY_MS'])
+sys.exit(0 if agg['verify_per_proof_ms'] <= limit else 1)
+PY
+          agg_verify_status=$?
+
+          if (( agg_verify_status != 0 )); then
+            echo "::error::AggregatedV1 verify time exceeds ${FOLDING_MAX_AGGREGATED_VERIFY_MS}ms"
+            exit 1
+          fi
+
+          python - <<'PY'
+import os, sys, json
+payload = json.load(open(os.environ['FOLDING_PERF_OUTPUT']))
+nova = next(run for run in payload['runs'] if run['version'] == 'NovaV2')
+limit = float(os.environ['FOLDING_MAX_NOVA_VERIFY_MS'])
+sys.exit(0 if nova['verify_per_proof_ms'] <= limit else 1)
+PY
+          nova_verify_status=$?
+
+          if (( nova_verify_status != 0 )); then
+            echo "::error::NovaV2 verify time exceeds ${FOLDING_MAX_NOVA_VERIFY_MS}ms"
+            exit 1
+          fi
+
+      - name: Upload folding artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: folding-benchmarks
+          path: |
+            ${FOLDING_PERF_OUTPUT}
+            folding-perf-summary.tsv
