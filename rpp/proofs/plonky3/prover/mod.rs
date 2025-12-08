@@ -590,6 +590,9 @@ impl ProofProver for Plonky3Prover {
     }
 
     fn prove_recursive(&self, witness: Self::RecursiveWitness) -> ChainResult<ChainProof> {
+        // TODO(fold_global): hand the recursive batch output to `fold_global`
+        // once the folding backend consumes Plonky3 recursion artifacts
+        // directly instead of relying on the legacy aggregator.
         let aggregator = RecursiveAggregator::new(self.params.clone(), self.backend.clone());
         let proof = aggregator.finalize(&witness)?;
         proof.into_value().map(ChainProof::Plonky3)
