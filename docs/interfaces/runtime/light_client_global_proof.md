@@ -6,7 +6,10 @@ Gossip- oder RPC-Headern lesen können. `global_instance_commitment` spiegelt de
 Blake2s-Hash (32 Bytes) über `(index || state_commitment || rpp_commitment)`
 wider; `global_proof_handle` enthält den Proof-Commitment-Hash (32 Bytes), die
 hex-kodierte Verifikationsschlüssel-ID (`vk_id`) und ein semantisches
-Versionslabel (`aggregated-v1` oder `nova-v2`).
+Versionslabel (`aggregated-v1` oder `nova-v2`). Das Label wird über eine
+**zentrale VK-Registry** auf konkrete `vk_id`-Einträge gemappt (siehe
+`docs/architecture/global_proof_vk_registry.md`) und erlaubt so, dass Clients
+rotierende Verifikationsschlüssel sicher auflösen.
 
 Ein komplettes Beispiel liegt unter
 `docs/interfaces/runtime/examples/light_client_global_proof.json` und zeigt die
@@ -24,7 +27,8 @@ dekodieren.
 2. Proof-Payload (`GlobalProof`) via Handle/Commitment vom Netz beziehen.
 3. `verify_global_proof(&header, &global_proof)` aufrufen. Der Helfer verifiziert
    Commitment- und VK-Konsistenz, prüft das erwartete Proof-Version-Label basierend
-   auf der Header-Höhe und hasht die Proof-Bytes erneut gegen das Commitment.
+   auf der Header-Höhe gegen die Registry-Abbildung und hasht die Proof-Bytes
+   erneut gegen das Commitment.
 
 ```rust
 use rpp_chain::runtime::types::{BlockHeader, verify_global_proof};
