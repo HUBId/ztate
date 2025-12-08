@@ -27,6 +27,7 @@ use crate::state::merkle::compute_merkle_root;
 use crate::stwo::aggregation::StateCommitmentSnapshot;
 use crate::stwo::proof::ProofPayload;
 use crate::vrf::{VrfProof, VRF_PREOUTPUT_LENGTH, VRF_PROOF_LENGTH};
+use tracing::warn;
 
 use serde_json;
 
@@ -424,6 +425,62 @@ fn parse_proof_version_label(label: &str) -> Option<ProofVersion> {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+enum GlobalProofRejectCode {
+    MissingInstanceCommitment,
+    InstanceCommitmentMismatch,
+    MissingHandle,
+    HandleCommitmentMismatch,
+    VkMismatch,
+    UnsupportedVersionLabel,
+    VersionNotPermitted,
+    VersionLabelMismatch,
+    PayloadCommitmentMismatch,
+    ProofUnavailable,
+}
+
+impl GlobalProofRejectCode {
+    fn as_str(&self) -> &'static str {
+        match self {
+            GlobalProofRejectCode::MissingInstanceCommitment => "FOLD-V-001",
+            GlobalProofRejectCode::InstanceCommitmentMismatch => "FOLD-V-002",
+            GlobalProofRejectCode::MissingHandle => "FOLD-V-003",
+            GlobalProofRejectCode::HandleCommitmentMismatch => "FOLD-V-004",
+            GlobalProofRejectCode::VkMismatch => "FOLD-V-005",
+            GlobalProofRejectCode::UnsupportedVersionLabel => "FOLD-V-006",
+            GlobalProofRejectCode::VersionNotPermitted => "FOLD-V-007",
+            GlobalProofRejectCode::VersionLabelMismatch => "FOLD-V-008",
+            GlobalProofRejectCode::PayloadCommitmentMismatch => "FOLD-V-009",
+            GlobalProofRejectCode::ProofUnavailable => "FOLD-V-010",
+        }
+    }
+}
+
+fn fold_validation_error(code: GlobalProofRejectCode, detail: impl Into<String>) -> ChainError {
+    let detail = detail.into();
+    warn!(
+        target: "folding.validator",
+        code = code.as_str(),
+        detail = %detail,
+        "global proof validation failed",
+    );
+    ChainError::Crypto(format!("{}: {}", code.as_str(), detail))
+}
+
+fn fold_validation_unavailable(
+    code: GlobalProofRejectCode,
+    detail: impl Into<String>,
+) -> ChainError {
+    let detail = detail.into();
+    warn!(
+        target: "folding.validator",
+        code = code.as_str(),
+        detail = %detail,
+        "global proof unavailable",
+    );
+    ChainError::InvalidProof(format!("{}: {}", code.as_str(), detail))
+}
+
 /// Validate a [`GlobalProof`] against the commitments surfaced in the
 /// [`BlockHeader`].
 ///
@@ -448,79 +505,102 @@ pub fn verify_global_proof_with_errors(
     global_proof: &GlobalProof,
 ) -> ChainResult<()> {
     let instance_commitment_hex = header.global_instance_commitment.as_ref().ok_or_else(|| {
-        ChainError::Crypto("global instance commitment missing from header".into())
+        fold_validation_error(
+            GlobalProofRejectCode::MissingInstanceCommitment,
+            "global instance commitment missing from header",
+        )
     })?;
 
     let instance_commitment = hex::decode(instance_commitment_hex).map_err(|err| {
-        ChainError::Crypto(format!(
-            "invalid global instance commitment encoding '{}': {err}",
-            instance_commitment_hex
-        ))
+        fold_validation_error(
+            GlobalProofRejectCode::MissingInstanceCommitment,
+            format!(
+                "invalid global instance commitment encoding '{}': {err}",
+                instance_commitment_hex
+            ),
+        )
     })?;
 
     if instance_commitment.as_slice() != global_proof.instance_commitment.as_slice() {
-        return Err(ChainError::Crypto(
-            "global instance commitment mismatch in header".into(),
+        return Err(fold_validation_error(
+            GlobalProofRejectCode::InstanceCommitmentMismatch,
+            "global instance commitment mismatch in header",
         ));
     }
 
-    let handle_summary = header
-        .global_proof_handle
-        .as_ref()
-        .ok_or_else(|| ChainError::Crypto("global proof handle missing from header".into()))?;
+    let handle_summary = header.global_proof_handle.as_ref().ok_or_else(|| {
+        fold_validation_error(
+            GlobalProofRejectCode::MissingHandle,
+            "global proof handle missing from header",
+        )
+    })?;
 
     let handle_commitment = hex::decode(&handle_summary.proof_commitment).map_err(|err| {
-        ChainError::Crypto(format!(
-            "invalid global proof commitment encoding '{}': {err}",
-            handle_summary.proof_commitment
-        ))
+        fold_validation_error(
+            GlobalProofRejectCode::HandleCommitmentMismatch,
+            format!(
+                "invalid global proof commitment encoding '{}': {err}",
+                handle_summary.proof_commitment
+            ),
+        )
     })?;
 
     if handle_commitment.as_slice() != global_proof.handle.proof_commitment {
-        return Err(ChainError::Crypto(
-            "global proof commitment mismatch in header".into(),
+        return Err(fold_validation_error(
+            GlobalProofRejectCode::HandleCommitmentMismatch,
+            "global proof commitment mismatch in header",
         ));
     }
 
     let header_vk = hex::decode(&handle_summary.vk_id).map_err(|err| {
-        ChainError::Crypto(format!(
-            "invalid global proof vk id '{}': {err}",
-            handle_summary.vk_id
-        ))
+        fold_validation_error(
+            GlobalProofRejectCode::VkMismatch,
+            format!(
+                "invalid global proof vk id '{}': {err}",
+                handle_summary.vk_id
+            ),
+        )
     })?;
 
     if header_vk.as_slice() != global_proof.handle.vk_id.as_slice() {
-        return Err(ChainError::Crypto(
-            "global proof vk id mismatch in header".into(),
+        return Err(fold_validation_error(
+            GlobalProofRejectCode::VkMismatch,
+            "global proof vk id mismatch in header",
         ));
     }
 
     let Some(version) = parse_proof_version_label(&handle_summary.version) else {
-        return Err(ChainError::Crypto(format!(
-            "unsupported global proof version label '{}'",
-            handle_summary.version
-        )));
+        return Err(fold_validation_error(
+            GlobalProofRejectCode::UnsupportedVersionLabel,
+            format!(
+                "unsupported global proof version label '{}'",
+                handle_summary.version
+            ),
+        ));
     };
 
     let expected_version = ProofVersion::for_height_and_epoch(Some(header.height), None);
 
     if version != expected_version || global_proof.handle.version != expected_version {
-        return Err(ChainError::Crypto(
-            "global proof version not permitted for height".into(),
+        return Err(fold_validation_error(
+            GlobalProofRejectCode::VersionNotPermitted,
+            "global proof version not permitted for height",
         ));
     }
 
     let expected_label = proof_version_label(expected_version);
     if handle_summary.version != expected_label {
-        return Err(ChainError::Crypto(
-            "global proof version label mismatch".into(),
+        return Err(fold_validation_error(
+            GlobalProofRejectCode::VersionLabelMismatch,
+            "global proof version label mismatch",
         ));
     }
 
     let proof_commitment = Blake2sHasher::hash(global_proof.proof_bytes.as_slice());
     if proof_commitment.0 != global_proof.handle.proof_commitment {
-        return Err(ChainError::Crypto(
-            "global proof payload does not match handle commitment".into(),
+        return Err(fold_validation_error(
+            GlobalProofRejectCode::PayloadCommitmentMismatch,
+            "global proof payload does not match handle commitment",
         ));
     }
 
@@ -541,14 +621,20 @@ where
     F: Fn(&GlobalProofHandleSummary) -> ChainResult<Option<GlobalProof>>,
 {
     let handle_summary = header.global_proof_handle.as_ref().ok_or_else(|| {
-        ChainError::InvalidProof("global proof handle missing from header".into())
+        fold_validation_unavailable(
+            GlobalProofRejectCode::MissingHandle,
+            "global proof handle missing from header",
+        )
     })?;
 
     let global_proof = fetch_by_handle(handle_summary)?.ok_or_else(|| {
-        ChainError::InvalidProof(format!(
-            "global proof not available for commitment {} (vk_id {})",
-            handle_summary.proof_commitment, handle_summary.vk_id
-        ))
+        fold_validation_unavailable(
+            GlobalProofRejectCode::ProofUnavailable,
+            format!(
+                "global proof not available for commitment {} (vk_id {})",
+                handle_summary.proof_commitment, handle_summary.vk_id
+            ),
+        )
     })?;
 
     verify_global_proof_with_errors(header, &global_proof)?;
