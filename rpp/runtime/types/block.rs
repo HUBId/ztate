@@ -373,14 +373,20 @@ impl BlockHeader {
         instance: &GlobalInstance,
         proof_handle: Option<&GlobalProofHandle>,
     ) -> Self {
-        let (state_commitment, rpp_commitment) = instance.to_header_fields();
+        let commitments = instance.to_header_fields();
 
         let mut preimage = Vec::with_capacity(
-            std::mem::size_of::<u64>() + state_commitment.len() + rpp_commitment.len(),
+            std::mem::size_of::<u64>()
+                + commitments.state_commitment.len()
+                + commitments.rpp_commitment.len()
+                + commitments.pruned_commitment.len()
+                + commitments.history_commitment.len(),
         );
         preimage.extend_from_slice(&instance.index.to_le_bytes());
-        preimage.extend_from_slice(state_commitment);
-        preimage.extend_from_slice(rpp_commitment);
+        preimage.extend_from_slice(commitments.state_commitment);
+        preimage.extend_from_slice(commitments.rpp_commitment);
+        preimage.extend_from_slice(commitments.pruned_commitment);
+        preimage.extend_from_slice(commitments.history_commitment);
 
         let instance_commitment = Blake2sHasher::hash(&preimage);
         self.global_instance_commitment = Some(hex::encode(<[u8; 32]>::from(instance_commitment)));
@@ -2046,10 +2052,14 @@ impl Block {
             }
         }
 
-        let (state_header, rpp_header) = instance.to_header_fields();
-        if state_header.is_empty() || rpp_header.is_empty() {
+        let commitments = instance.to_header_fields();
+        if commitments.state_commitment.is_empty()
+            || commitments.rpp_commitment.is_empty()
+            || commitments.pruned_commitment.is_empty()
+            || commitments.history_commitment.is_empty()
+        {
             return Err(ChainError::Crypto(
-                "global instance is missing state or pruning commitments".into(),
+                "global instance is missing state, pruning, or history commitments".into(),
             ));
         }
 
