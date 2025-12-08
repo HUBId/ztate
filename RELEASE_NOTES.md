@@ -40,6 +40,10 @@ The project is standardised on the Rust `1.79.0` toolchain. Each release must co
   installation, configuration with `config/node.toml`, rollout feature gates,
   telemetry options, and recovery procedures for VRF mismatches and missing
   snapshots.
+- Dokumentiert die [Nova-Folding-Demo](docs/nova_folding_demo.md) inklusive
+  Repro-Skript [`scripts/demo_nova_folding.sh`](scripts/demo_nova_folding.sh),
+  die `I_boot` + `π_boot` initialisiert, drei Mock-Folds durchläuft und den
+  Handle/Validation-Flow für Tester sichtbar macht.
 - Published the [Wallet Support Policy](docs/wallet_support_policy.md), which
   enumerates long-term wallet configurations, minimum system requirements,
   support tiers (LTS, maintenance, experimental), and explicit deprecation
