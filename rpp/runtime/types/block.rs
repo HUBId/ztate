@@ -27,7 +27,7 @@ use crate::state::merkle::compute_merkle_root;
 use crate::stwo::aggregation::StateCommitmentSnapshot;
 use crate::stwo::proof::ProofPayload;
 use crate::vrf::{VrfProof, VRF_PREOUTPUT_LENGTH, VRF_PROOF_LENGTH};
-use tracing::warn;
+use tracing::{info, warn};
 
 use serde_json;
 
@@ -496,11 +496,67 @@ fn fold_validation_unavailable(
 ///   [`ProofVersion::for_height_and_epoch`]) matches both the header label and
 ///   the proof handle.
 pub fn verify_global_proof(header: &BlockHeader, global_proof: &GlobalProof) -> bool {
-    verify_global_proof_with_errors(header, global_proof).is_ok()
+    verify_global_proof_with_metrics(header, global_proof, None).is_ok()
 }
 
 /// Validate a [`GlobalProof`] and bubble up precise error messages.
 pub fn verify_global_proof_with_errors(
+    header: &BlockHeader,
+    global_proof: &GlobalProof,
+) -> ChainResult<()> {
+    verify_global_proof_with_metrics(header, global_proof, None)
+}
+
+/// Validate a [`GlobalProof`] while emitting telemetry for operators.
+pub fn verify_global_proof_with_metrics(
+    header: &BlockHeader,
+    global_proof: &GlobalProof,
+    metrics: Option<&RuntimeMetrics>,
+) -> ChainResult<()> {
+    let started = Instant::now();
+    let vk_hex = hex::encode(global_proof.handle.vk_id.as_slice());
+    let version_label = proof_version_label(global_proof.handle.version);
+    let proof_bytes = global_proof.proof_bytes.as_slice().len() as u64;
+
+    let result = verify_global_proof_with_errors_impl(header, global_proof);
+    let duration = started.elapsed();
+
+    if let Some(metrics) = metrics {
+        metrics.proofs().record_global_verification(
+            header.height,
+            &vk_hex,
+            version_label,
+            proof_bytes,
+            duration,
+            result.is_ok(),
+        );
+    }
+
+    match &result {
+        Ok(_) => info!(
+            target: "folding.validator",
+            height = header.height,
+            vk_id = %vk_hex,
+            version = version_label,
+            proof_bytes,
+            verify_ms = duration.as_millis(),
+            "global proof verified",
+        ),
+        Err(err) => warn!(
+            target: "folding.validator",
+            height = header.height,
+            vk_id = %vk_hex,
+            version = version_label,
+            proof_bytes,
+            error = %err,
+            "global proof verification failed",
+        ),
+    }
+
+    result
+}
+
+fn verify_global_proof_with_errors_impl(
     header: &BlockHeader,
     global_proof: &GlobalProof,
 ) -> ChainResult<()> {
@@ -613,9 +669,10 @@ pub fn verify_global_proof_with_errors(
 /// commitment contained in [`BlockHeader::global_proof_handle`]. Missing proofs
 /// or transport failures are surfaced as `ChainError::InvalidProof`, keeping the
 /// error separate from cryptographic validation failures.
-pub fn fetch_and_verify_global_proof<F>(
+pub fn fetch_and_verify_global_proof_with_metrics<F>(
     header: &BlockHeader,
     fetch_by_handle: F,
+    metrics: Option<&RuntimeMetrics>,
 ) -> ChainResult<GlobalProof>
 where
     F: Fn(&GlobalProofHandleSummary) -> ChainResult<Option<GlobalProof>>,
@@ -637,9 +694,19 @@ where
         )
     })?;
 
-    verify_global_proof_with_errors(header, &global_proof)?;
+    verify_global_proof_with_metrics(header, &global_proof, metrics)?;
 
     Ok(global_proof)
+}
+
+pub fn fetch_and_verify_global_proof<F>(
+    header: &BlockHeader,
+    fetch_by_handle: F,
+) -> ChainResult<GlobalProof>
+where
+    F: Fn(&GlobalProofHandleSummary) -> ChainResult<Option<GlobalProof>>,
+{
+    fetch_and_verify_global_proof_with_metrics(header, fetch_by_handle, None)
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

@@ -1,3 +1,7 @@
+use hex;
+use once_cell::sync::Lazy;
+use opentelemetry::metrics::{Counter, Histogram};
+use opentelemetry::{global, KeyValue};
 use serde::{de::Error as DeError, Deserialize, Deserializer, Serialize, Serializer};
 use std::time::Instant;
 use tracing::{debug, info, warn};
@@ -9,6 +13,8 @@ const GLOBAL_PROOF_BYTES_MAX_LEN: usize = 4096;
 const VERIFICATION_KEY_ID_MAX_LEN: usize = 64;
 const PROOF_COMMITMENT_LEN: usize = 32;
 const BLOCK_WITNESS_PAYLOAD_MAX_LEN: usize = 4096;
+
+static FOLD_METRICS: Lazy<FoldMetrics> = Lazy::new(FoldMetrics::new);
 
 #[derive(Clone, Copy, Debug)]
 enum FoldPipelineRejectCode {
@@ -30,6 +36,107 @@ impl FoldPipelineRejectCode {
             FoldPipelineRejectCode::ProofInstanceMismatch => "FOLD-STEP-011",
             FoldPipelineRejectCode::BackendRejected => "FOLD-STEP-099",
         }
+    }
+}
+
+struct FoldMetrics {
+    fold_duration: Histogram<f64>,
+    verify_duration: Histogram<f64>,
+    proof_size: Histogram<u64>,
+    failures: Counter<u64>,
+}
+
+impl FoldMetrics {
+    fn new() -> Self {
+        let meter = global::meter("rpp-folding");
+
+        Self {
+            fold_duration: meter
+                .f64_histogram("rpp.folding.fold_duration_ms")
+                .with_description("Duration of a single fold step in milliseconds")
+                .with_unit("ms")
+                .build(),
+            verify_duration: meter
+                .f64_histogram("rpp.folding.verify_duration_ms")
+                .with_description("Duration of post-fold verification in milliseconds")
+                .with_unit("ms")
+                .build(),
+            proof_size: meter
+                .u64_histogram("rpp.folding.proof_bytes")
+                .with_description("Serialized byte length of folded proofs")
+                .with_unit("By")
+                .build(),
+            failures: meter
+                .u64_counter("rpp.folding.failures_total")
+                .with_description("Total folding failures grouped by reject code")
+                .with_unit("1")
+                .build(),
+        }
+    }
+
+    fn fold_attributes(
+        block_height: u64,
+        vk_id: &FixedBytes<VERIFICATION_KEY_ID_MAX_LEN>,
+        version: ProofVersion,
+    ) -> [KeyValue; 3] {
+        [
+            KeyValue::new("height", block_height as i64),
+            KeyValue::new("vk_id", hex::encode(vk_id.as_slice())),
+            KeyValue::new("version", format!("{:?}", version)),
+        ]
+    }
+
+    fn record_fold(
+        &self,
+        block_height: u64,
+        vk_id: &FixedBytes<VERIFICATION_KEY_ID_MAX_LEN>,
+        version: ProofVersion,
+        duration: f64,
+    ) {
+        let attributes = Self::fold_attributes(block_height, vk_id, version);
+        self.fold_duration.record(duration, &attributes);
+    }
+
+    fn record_verify(
+        &self,
+        block_height: u64,
+        vk_id: &FixedBytes<VERIFICATION_KEY_ID_MAX_LEN>,
+        version: ProofVersion,
+        duration: f64,
+    ) {
+        let attributes = Self::fold_attributes(block_height, vk_id, version);
+        self.verify_duration.record(duration, &attributes);
+    }
+
+    fn record_proof_size(
+        &self,
+        block_height: u64,
+        vk_id: &FixedBytes<VERIFICATION_KEY_ID_MAX_LEN>,
+        version: ProofVersion,
+        bytes: u64,
+    ) {
+        let attributes = Self::fold_attributes(block_height, vk_id, version);
+        self.proof_size.record(bytes, &attributes);
+    }
+
+    fn record_failure(
+        &self,
+        block_height: u64,
+        code: FoldPipelineRejectCode,
+        vk_id: Option<&FixedBytes<VERIFICATION_KEY_ID_MAX_LEN>>,
+        version: Option<ProofVersion>,
+    ) {
+        let mut attributes = vec![KeyValue::new("code", code.as_str())];
+
+        attributes.push(KeyValue::new("height", block_height as i64));
+        if let Some(vk) = vk_id {
+            attributes.push(KeyValue::new("vk_id", hex::encode(vk.as_slice())));
+        }
+        if let Some(version) = version {
+            attributes.push(KeyValue::new("version", format!("{:?}", version)));
+        }
+
+        self.failures.add(1, &attributes);
     }
 }
 
@@ -426,6 +533,12 @@ pub fn fold_pipeline_step(
             detail = %detail,
             "fold pipeline rejected",
         );
+        FOLD_METRICS.record_failure(
+            block_witness.block_number,
+            code,
+            Some(&proof_prev.handle.vk_id),
+            Some(proof_prev.handle.version),
+        );
         BackendError::Failure(format!("{}: {}", code.as_str(), detail))
     };
 
@@ -502,11 +615,31 @@ pub fn fold_pipeline_step(
                 "folding step completed"
             );
 
+            FOLD_METRICS.record_fold(
+                block_witness.block_number,
+                &proof_next.handle.vk_id,
+                proof_next.handle.version,
+                fold_elapsed.as_secs_f64() * 1000.0,
+            );
+            FOLD_METRICS.record_proof_size(
+                block_witness.block_number,
+                &proof_next.handle.vk_id,
+                proof_next.handle.version,
+                proof_next.proof_bytes.as_slice().len() as u64,
+            );
+
             #[cfg(feature = "folding-verify")]
             {
                 let verify_start = Instant::now();
                 let verified = backend.verify(&instance_next, &proof_next)?;
                 let verify_elapsed = verify_start.elapsed();
+
+                FOLD_METRICS.record_verify(
+                    block_witness.block_number,
+                    &proof_next.handle.vk_id,
+                    proof_next.handle.version,
+                    verify_elapsed.as_secs_f64() * 1000.0,
+                );
 
                 if !verified {
                     warn!(
@@ -544,6 +677,12 @@ pub fn fold_pipeline_step(
                 witness_block = block_witness.block_number,
                 error = %annotated,
                 "folding step failed",
+            );
+            FOLD_METRICS.record_failure(
+                block_witness.block_number,
+                FoldPipelineRejectCode::BackendRejected,
+                Some(&proof_prev.handle.vk_id),
+                Some(proof_prev.handle.version),
             );
             Err(BackendError::Failure(format!(
                 "{}: {}",
