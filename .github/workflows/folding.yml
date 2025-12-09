@@ -1,0 +1,39 @@
+name: Folding layer CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+jobs:
+  folding-tests:
+    name: Folding unit and migration tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: folding-tests
+
+      - name: Run folding unit tests
+        run: |
+          set -euo pipefail
+          cargo test -p rpp-chain global_proof
+          cargo test -p rpp-chain block_witness_flows_into_mock_fold_pipeline
+
+      - name: Validate storage folding integration
+        run: |
+          set -euo pipefail
+          cargo test -p rpp-chain bootstraps_fold_pipeline_from_cut_tip
+
+      - name: Enforce AggregatedV1 -> NovaV2 migration guardrails
+        run: |
+          set -euo pipefail
+          cargo test -p rpp-chain nova_cutover_requires_bootstrap_version_shift
