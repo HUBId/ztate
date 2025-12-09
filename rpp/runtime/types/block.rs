@@ -3184,6 +3184,143 @@ mod tests {
         assert!(!verify_global_proof(&nova_header, &nova_proof));
     }
 
+    #[test]
+    fn mixed_cutover_nodes_handle_v1_and_v2_payloads() {
+        struct CutoverGuard(u64, u64);
+        impl Drop for CutoverGuard {
+            fn drop(&mut self) {
+                ProofVersion::configure_cutover(self.0, self.1);
+            }
+        }
+
+        let original_cutover = ProofVersion::current_cutover();
+        let _guard = CutoverGuard(original_cutover.0, original_cutover.1);
+
+        let nova_cutover_height = 50u64;
+        ProofVersion::configure_cutover(nova_cutover_height, 0);
+
+        let aggregated_instance = GlobalInstance::from_state_and_rpp(
+            nova_cutover_height - 1,
+            b"state-pre-cutover",
+            b"rpp-pre-cutover",
+        );
+        let aggregated_proof = GlobalProof::new(
+            aggregated_instance.commitment.clone(),
+            b"aggregated-proof",
+            b"vk-aggregated",
+            ProofVersion::AggregatedV1,
+        )
+        .expect("aggregated proof creation succeeds");
+        let aggregated_header = header_at_height(nova_cutover_height - 1)
+            .with_global_instance(&aggregated_instance, Some(&aggregated_proof.handle));
+
+        let nova_instance = GlobalInstance::from_state_and_rpp(
+            nova_cutover_height,
+            b"state-post-cutover",
+            b"rpp-post-cutover",
+        );
+        let nova_proof = GlobalProof::new(
+            nova_instance.commitment.clone(),
+            b"nova-proof",
+            b"vk-nova",
+            ProofVersion::NovaV2,
+        )
+        .expect("nova proof creation succeeds");
+        let nova_header = header_at_height(nova_cutover_height)
+            .with_global_instance(&nova_instance, Some(&nova_proof.handle));
+
+        // Upgraded nodes should accept both pre-cutover AggregatedV1 and post-cutover NovaV2
+        // payloads while the network spans the transition height.
+        assert!(verify_global_proof(&aggregated_header, &aggregated_proof));
+        assert!(verify_global_proof(&nova_header, &nova_proof));
+
+        // Legacy nodes that never learned about the cutover must still reject the new payload
+        // format instead of silently following an incompatible fork.
+        ProofVersion::configure_cutover(u64::MAX, u64::MAX);
+
+        assert!(verify_global_proof(&aggregated_header, &aggregated_proof));
+        assert!(!verify_global_proof(&nova_header, &nova_proof));
+    }
+
+    #[test]
+    fn proof_handles_round_trip_across_mixed_networks() {
+        struct CutoverGuard(u64, u64);
+        impl Drop for CutoverGuard {
+            fn drop(&mut self) {
+                ProofVersion::configure_cutover(self.0, self.1);
+            }
+        }
+
+        let original_cutover = ProofVersion::current_cutover();
+        let _guard = CutoverGuard(original_cutover.0, original_cutover.1);
+
+        let cutover_height = 75u64;
+        ProofVersion::configure_cutover(cutover_height, 0);
+
+        let aggregated_instance = GlobalInstance::from_state_and_rpp(
+            cutover_height - 1,
+            b"state-pre-compat",
+            b"rpp-pre-compat",
+        );
+        let aggregated_proof = GlobalProof::new(
+            aggregated_instance.commitment.clone(),
+            b"aggregated-proof",
+            b"vk-aggregated",
+            ProofVersion::AggregatedV1,
+        )
+        .expect("aggregated proof creation succeeds");
+        let aggregated_header = header_at_height(cutover_height - 1)
+            .with_global_instance(&aggregated_instance, Some(&aggregated_proof.handle));
+
+        let nova_instance = GlobalInstance::from_state_and_rpp(
+            cutover_height,
+            b"state-post-compat",
+            b"rpp-post-compat",
+        );
+        let nova_proof = GlobalProof::new(
+            nova_instance.commitment.clone(),
+            b"nova-proof",
+            b"vk-nova",
+            ProofVersion::NovaV2,
+        )
+        .expect("nova proof creation succeeds");
+        let nova_header = header_at_height(cutover_height)
+            .with_global_instance(&nova_instance, Some(&nova_proof.handle));
+
+        let aggregated_summary = aggregated_header
+            .global_proof_handle
+            .as_ref()
+            .expect("aggregated handle present");
+        let aggregated_json =
+            serde_json::to_string(&aggregated_summary).expect("serialize aggregated handle");
+        let aggregated_deser: GlobalProofHandleSummary =
+            serde_json::from_str(&aggregated_json).expect("deserialize aggregated handle");
+
+        let nova_summary = nova_header
+            .global_proof_handle
+            .as_ref()
+            .expect("nova handle present");
+        let nova_json = serde_json::to_string(&nova_summary).expect("serialize nova handle");
+        let nova_deser: GlobalProofHandleSummary =
+            serde_json::from_str(&nova_json).expect("deserialize nova handle");
+
+        // Proof fetchers should be able to work off the serialized representation without losing
+        // commitment or version data.
+        let aggregated_fetched = fetch_and_verify_global_proof(&aggregated_header, |handle| {
+            assert_eq!(handle, &aggregated_deser);
+            Ok(Some(aggregated_proof.clone()))
+        })
+        .expect("aggregated proof should verify after round-trip");
+        assert_eq!(aggregated_fetched, aggregated_proof);
+
+        let nova_fetched = fetch_and_verify_global_proof(&nova_header, |handle| {
+            assert_eq!(handle, &nova_deser);
+            Ok(Some(nova_proof.clone()))
+        })
+        .expect("nova proof should verify after round-trip");
+        assert_eq!(nova_fetched, nova_proof);
+    }
+
     fn seeded_keypair(seed: u8) -> Keypair {
         let secret = SecretKey::from_bytes(&[seed; 32]).expect("secret");
         let public = PublicKey::from(&secret);
