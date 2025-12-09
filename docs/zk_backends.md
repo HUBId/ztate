@@ -54,6 +54,26 @@
   CPU/GPU-Interop über den Python-Validator im Workflow. Artefakte werden als
   `simnet-prover-acceleration-mix-…` hochgeladen.【F:.github/workflows/nightly.yml†L1338-L1397】
 
+## Kompatibilität & Rollout-Fallen
+
+- Der Umschaltpunkt auf Nova V2 folgt den in `ProofVersion::configure_cutover`
+  hinterlegten Grenzwerten. Upgegradete Knoten akzeptieren sowohl Aggregated V1
+  (vor dem Grenzwert) als auch Nova V2 (ab dem Grenzwert). Legacy-Knoten, die
+  den Cutover nicht kennen, lehnen Nova-Payloads konsequent ab; sie müssen vor
+  dem Grenzwert aktualisiert oder offline genommen werden, um Forks zu
+  vermeiden.【F:rpp/runtime/types/block.rs†L2977-L3044】
+- Proof-Downloads verwenden die serialisierte `GlobalProofHandleSummary` aus dem
+  Header. Die JSON-Repräsentation bleibt stabil über beide Versionen hinweg und
+  reicht aus, um Commitment, VK-ID und Versionslabel korrekt aufzulösen; Fetcher
+  dürfen deshalb nur den Handle-Content prüfen und anschließend das Payload
+  erneut verifizieren, um inkonsistente Transportpfade zu erkennen.【F:rpp/runtime/types/block.rs†L3046-L3093】
+- Operativer Workaround für inkompatible Alt-Nodes: Cutover-Schwellen per
+  `ProofVersion::configure_cutover` temporär zurücksetzen, damit die Knoten
+  Aggregated V1 weiter prüfen können, und sie dann mit aktualisierter Binärdatei
+  oder konfiguriertem Nova-Cutover neu starten. Dauerhafter Betrieb jenseits des
+  offiziellen Grenzwerts ist nicht unterstützt und sollte nur zur Incident-
+  Eindämmung genutzt werden.【F:rpp/runtime/types/block.rs†L2987-L3044】
+
 ## Beschleunigte Prover-Läufe
 
 - Der Nightly-Workflow enthält einen optionalen Accelerator-Lauf
