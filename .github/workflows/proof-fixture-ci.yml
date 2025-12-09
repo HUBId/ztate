@@ -1,0 +1,77 @@
+name: Proof + VK compatibility
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  release:
+    types: [released]
+  schedule:
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+
+jobs:
+  unit-and-property:
+    name: Unit and property checks
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Cache Cargo artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-all-crates: true
+      - name: Run unit + property suites
+        run: |
+          set -euo pipefail
+          cargo run --locked --package xtask -- test-unit
+
+  api-contract:
+    name: API contract guard
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate contract fixtures
+        run: |
+          set -euo pipefail
+          python3 scripts/ci/api_contract_guard.py
+
+  vk-rotation-matrix:
+    name: VK rotation matrix
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate rotation matrix and roundtrip fixtures
+        run: |
+          set -euo pipefail
+          chmod +x scripts/ci/run_roundtrip_matrix.sh
+          scripts/ci/run_roundtrip_matrix.sh
+
+  migration-compat:
+    name: Migration compatibility
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check migration tags in fixtures
+        run: |
+          set -euo pipefail
+          python3 scripts/ci/migration_compatibility_check.py
+
+  perf-bench:
+    name: Perf guardrails
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Enforce proof/VK thresholds
+        env:
+          PROOF_SIZE_THRESHOLD: 26000
+          VK_SIZE_THRESHOLD: 20000
+          ROUNDTRIP_LATENCY_THRESHOLD: 150
+          ROTATION_LATENCY_THRESHOLD: 120
+        run: |
+          set -euo pipefail
+          python3 scripts/ci/check_fixture_thresholds.py

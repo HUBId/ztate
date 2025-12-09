@@ -1,0 +1,12 @@
+{
+  "version": "v2",
+  "proof_bytes": 22560,
+  "vk_bytes": 9744,
+  "roundtrip_latency_ms": 81,
+  "rotation_latency_ms": 68,
+  "migration_tag": "2024-08-rollup",
+  "api_contract": {
+    "required_fields": ["version", "proof", "public_inputs", "vk_commitment", "created_at", "hints"],
+    "status": "active"
+  }
+}

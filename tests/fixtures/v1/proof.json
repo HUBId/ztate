@@ -1,0 +1,7 @@
+{
+  "version": "v1",
+  "proof": "ZmFrZS1wcm9vZi12MQ==",
+  "public_inputs": ["0x00e1", "0x0aff"],
+  "vk_commitment": "vk-v1",
+  "created_at": "2024-06-04T12:00:00Z"
+}
